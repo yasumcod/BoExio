@@ -390,6 +390,8 @@ scrape_log_YYYY-MM-DD.txt
 
 - 毎週自動実行する
 - 成果物をArtifactsまたはReleasesに保存する
+
+- URL単位の再試行制御とrun全体の失敗判定を標準化する
 - サイト負荷とブロックリスクを抑えた実行制御を標準化する
 
 完了条件:
@@ -398,9 +400,28 @@ scrape_log_YYYY-MM-DD.txt
 - 手動実行もできる
 - 失敗時にログを確認できる
 - Private Repositoryで運用できる
-- レート制限（requests/sec上限・同時接続数・クロール時間帯）が設定ファイルで管理される
-- ブロック兆候（403増加、captcha検知）を監視し、しきい値超過でジョブを自動停止できる
-- 実行ログに停止理由（403率、captcha検知件数、停止時刻）を記録できる
+- 再試行・打ち切り・run失敗判定が設定ファイルで管理できる
+
+運用仕様（再試行・打ち切り・全体失敗判定）:
+
+- URL単位の再試行
+  - `max_retries_per_url = 3`（初回失敗後に最大3回再試行、合計4試行）
+  - backoffは指数方式 + ジッター（例: `base=5s`, `10s`, `20s` + ランダム0-3s）
+  - `HTTP_404` と `SCHEMA_MISMATCH` は非再試行（恒久失敗として即打ち切り）
+  - `HTTP_429`, `HTTP_5xx`, `TIMEOUT_*`, `RATE_LIMITED` は再試行対象
+- URL単位の打ち切り条件
+  - 同一URLで再試行上限到達
+  - 単一URLの累積処理時間が `max_url_runtime_sec`（例: 180秒）を超過
+  - `SELECTOR_MISS` または `PARSE_ERROR` が連続2回発生（DOM変更疑いとして打ち切り）
+- 実行全体（run）失敗判定
+  - `failure_rate = failure_count / target_count`
+  - `failure_rate > 0.30` のとき `run_status=failed`
+  - または `target_count >= 20` かつ `failure_count >= 5` でも `run_status=failed`
+  - 上記未満でも `SCHEMA_MISMATCH` が全体で3件以上なら `run_status=failed`（実装破綻シグナル）
+  - `run_status=failed` の場合も生成済み成果物と `errors` シートは必ず保存する
+  - レート制限（requests/sec上限・同時接続数・クロール時間帯）が設定ファイルで管理される
+  - ブロック兆候（403増加、captcha検知）を監視し、しきい値超過でジョブを自動停止できる
+  - 実行ログに停止理由（403率、captcha検知件数、停止時刻）を記録できる
 
 ### Phase 7: 見積運用連携
 
@@ -495,6 +516,21 @@ CSV/Excel成果物とは別に run metadata を保存し、最低でも `schema_
 ### 失敗の見える化
 
 取得失敗、パース失敗、価格未取得をレポートとログに出すこと。
+
+運用仕様（最低限）:
+
+- エラーコード体系を統一する。
+  - `HTTP_<status>`: HTTPステータス起因（例: `HTTP_404`, `HTTP_429`, `HTTP_500`）
+  - `TIMEOUT_CONNECT` / `TIMEOUT_READ` / `TIMEOUT_RENDER`: 接続・応答・描画待ちのタイムアウト
+  - `SELECTOR_MISS`: 期待したDOMセレクタ要素が取得不可
+  - `SCHEMA_MISMATCH`: JSON/HTMLの構造が想定スキーマと不一致
+  - `PARSE_ERROR`: 価格・SKU・寸法などの値変換失敗
+  - `RATE_LIMITED`: サイト側レート制限を検知
+  - `UNKNOWN`: 上記に分類できない例外（messageに生ログ要約を残す）
+- `errors` シートの必須列を固定し、欠損時はレポート生成を失敗扱いにする。
+  - 必須列: `url`, `phase`, `error_code`, `message`, `first_seen_at`, `last_seen_at`
+  - `phase` は `fetch` / `render` / `parse` / `normalize` / `diff` / `report` のいずれか
+  - `first_seen_at` は当該run内での初回発生時刻、`last_seen_at` は最終発生時刻
 
 ### 運用安全性
 
