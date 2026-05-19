@@ -292,6 +292,40 @@ scrape_log_YYYY-MM-DD.txt
 
 前回存在したが今回見つからなかった商品または構成。すぐ販売終了と断定せず、削除候補として扱う。
 
+状態遷移を明確化するため、removed 判定は次のステータスを持つ。
+
+- active: 今回実行で検知できた通常状態
+- missing_candidate: 今回未検知。販売終了候補として監視中
+- discontinued: 連続未検知が閾値に達し、販売終了確定
+- revived: discontinued 後に再検知され、復活として記録された状態
+
+週次実行を前提に、`連続4回未検知` を discontinued 化の閾値とする。
+
+```text
+active
+  └─(1回未検知)→ missing_candidate
+missing_candidate
+  ├─(再検知)→ active
+  └─(連続4回未検知到達)→ discontinued
+discontinued
+  └─(再検知)→ revived
+revived
+  └─(次回も検知)→ active
+```
+
+revived 条件は「discontinued 判定済みの比較キーが再検知されたこと」。このとき次を必須で記録する。
+
+- 復活検知日（revived_at）
+- 直前の discontinued 判定日（discontinued_at）
+- 連続未検知回数（missing_streak_at_discontinue）
+- 復活後初回価格（revived_price）
+
+集計項目は summary / removed の双方で次を出力する。
+
+- 新規候補数（missing_candidate に新規遷移した件数）
+- 確定終了数（discontinued に新規遷移した件数）
+- 復活数（discontinued から revived に遷移した件数）
+
 ### errors
 
 取得失敗や解析失敗を一覧化する。運用上はこのシートが重要。失敗が見えない自動化は信用されない。
@@ -474,9 +508,15 @@ repo/
 - 価格は税込・税抜どちらを正とするか
 - 表示価格と定価が両方ある場合、どちらを差分対象にするか
 - 張地や脚の表記ゆれをどう扱うか
-- 削除候補を何週連続で販売終了扱いにするか
 - 成果物はArtifactsで十分か、Releasesに残すか
 - 営業が最初に見るべきファイルはCSVかExcelか
+
+### 状態遷移に関する確定事項（removed 運用）
+
+- 状態は `active / missing_candidate / discontinued / revived` の4種類を採用する
+- 週次実行前提で `連続4回未検知` を `discontinued` の閾値とする
+- `discontinued` の比較キーが再検知された場合は `revived` を付与し、履歴（復活日・終了判定日・連続未検知回数・復活時価格）を残す
+- 集計は `summary` と `removed` の双方で `新規候補数 / 確定終了数 / 復活数` を出す
 
 ## 16. 次に作るべき具体物
 
