@@ -461,11 +461,19 @@ repo/
 
 ### 再現性
 
-同じ入力URLと同じ取得日時のデータから、同じCSVとレポートが生成されること。
+同じ入力URLと同じ取得日時のデータから、同じCSVとレポートが生成されること。監査時の再実行に備え、最小情報セット（入力URL一覧、取得日時、schema_version、parser_version、commit_sha、run_id、実行ログ、出力ファイルチェックサム）を必ず保存する。
+
+### メタデータ管理
+
+CSV/Excel成果物とは別に run metadata を保存し、最低でも `schema_version`、`parser_version`、`commit_sha`、`run_id` を持たせる。
+
+差分比較時は `schema_version` の一致を必須条件とし、不一致時は「差分処理を停止」または「互換変換を実施してから比較」のどちらかを明示ルールで選択する。互換変換を選ぶ場合は変換ロジックのバージョンも記録する。
+
+ファイル命名は `products_YYYY-MM-DD.csv` を維持しつつ、必ず `run_id` と紐付ける（例: 同日複数実行時はメタデータで1対1対応、または `products_YYYY-MM-DD_<run_id>.csv` を許容）。どの命名方式でも、比較対象の特定に `run_id` を使う運用ルールを固定する。
 
 ### 追跡性
 
-各行にsource_urlとsource_checked_atを持たせ、後から元ページを確認できること。
+各行にsource_urlとsource_checked_atを持たせ、後から元ページを確認できること。加えて、成果物ファイルと run metadata を run_id で相互参照できること。
 
 ### 失敗の見える化
 
