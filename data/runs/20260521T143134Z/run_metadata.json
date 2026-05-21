@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1.0",
+  "parser_version": "0.1.0",
+  "commit_sha": "37a56c8",
+  "run_id": "20260521T143134Z",
+  "started_at": "2026-05-21T14:31:34.721984+00:00",
+  "finished_at": "2026-05-21T14:31:36.481661+00:00",
+  "target_urls": [
+    "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/"
+  ],
+  "output_files": [
+    "data/runs/20260521T143134Z/products_poc.csv",
+    "data/runs/20260521T143134Z/scrape_log.txt"
+  ],
+  "output_file_checksums": {
+    "data/runs/20260521T143134Z/products_poc.csv": "6eea5916a108ce4f6ac7be1b8ffecb4f432b838e29e5b39af945713f8f32377c",
+    "data/runs/20260521T143134Z/scrape_log.txt": "27ae07f7de0d97d406817da3f8bde584229969138f98b3b388e89225bfdeeb93"
+  },
+  "run_status": "success",
+  "success_count": 1,
+  "failure_count": 0,
+  "notes": [
+    "Phase 1 PoC: category URL is allowed input; discovered product URL under /ja-jp/p/ is fetched for product detail inspection."
+  ]
+}

@@ -1,0 +1,7 @@
+# BoExio Phase 1 target URLs
+#
+# 1 URL per line.
+# Blank lines and comment lines are ignored.
+#
+# Initial MVP target category:
+https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/
