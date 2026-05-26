@@ -8,6 +8,7 @@ from pathlib import Path
 from boexio.phase2_variants import PHASE2_CSV_COLUMNS
 from boexio.phase6_workflow import (
     PhaseResult,
+    copy_if_exists,
     overall_run_status,
     prepare_previous,
     release_name_for_date,
@@ -91,6 +92,18 @@ class Phase6WorkflowTests(unittest.TestCase):
             self.assertIn("phase4_diff_summary.json", copied)
             self.assertIn("phase5_weekly_report.xlsx", copied)
             self.assertIn("workflow_phase3.log", copied)
+
+    def test_copy_if_exists_replaces_empty_files_with_placeholder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "empty.log"
+            destination = root / "out" / "empty.log"
+            source.write_text("", encoding="utf-8")
+
+            self.assertTrue(copy_if_exists(source, destination))
+
+            self.assertGreater(destination.stat().st_size, 0)
+            self.assertIn("was generated but empty", destination.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

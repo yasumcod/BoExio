@@ -89,6 +89,9 @@ def copy_if_exists(source: Path, destination: Path) -> bool:
     if not source.exists():
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.stat().st_size == 0:
+        destination.write_text(f"{source.name} was generated but empty.\n", encoding="utf-8")
+        return True
     shutil.copy2(source, destination)
     return True
 
