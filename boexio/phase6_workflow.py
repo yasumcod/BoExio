@@ -90,10 +90,18 @@ def copy_if_exists(source: Path, destination: Path) -> bool:
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.stat().st_size == 0:
-        destination.write_text(f"{source.name} was generated but empty.\n", encoding="utf-8")
+        write_text_for_destination(destination, f"{source.name} was generated but empty.\n")
+        return True
+    if destination.suffix.lower() == ".csv":
+        write_text_for_destination(destination, source.read_text(encoding="utf-8-sig"))
         return True
     shutil.copy2(source, destination)
     return True
+
+
+def write_text_for_destination(destination: Path, text: str) -> None:
+    encoding = "utf-8-sig" if destination.suffix.lower() == ".csv" else "utf-8"
+    destination.write_text(text, encoding=encoding)
 
 
 def copy_first_matching(directory: Path, pattern: str, destination: Path) -> bool:

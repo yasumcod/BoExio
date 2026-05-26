@@ -105,6 +105,29 @@ class Phase6WorkflowTests(unittest.TestCase):
             self.assertGreater(destination.stat().st_size, 0)
             self.assertIn("was generated but empty", destination.read_text(encoding="utf-8"))
 
+    def test_copy_if_exists_writes_csv_with_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.csv"
+            destination = root / "out" / "phase4_price_changes.csv"
+            source.write_text("product_name\n日本語の商品\n", encoding="utf-8")
+
+            self.assertTrue(copy_if_exists(source, destination))
+
+            self.assertTrue(destination.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertIn("日本語の商品", destination.read_text(encoding="utf-8-sig"))
+
+    def test_copy_if_exists_preserves_existing_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.csv"
+            destination = root / "out" / "phase3_products_current.csv"
+            source.write_text("product_name\n日本語の商品\n", encoding="utf-8-sig")
+
+            self.assertTrue(copy_if_exists(source, destination))
+
+            self.assertEqual(1, destination.read_bytes().count(b"\xef\xbb\xbf"))
+
 
 if __name__ == "__main__":
     unittest.main()
