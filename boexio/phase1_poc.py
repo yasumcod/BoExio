@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -19,7 +20,11 @@ from urllib.request import Request, urlopen
 
 SCHEMA_VERSION = "0.1.0"
 PARSER_VERSION = "0.1.0"
-USER_AGENT = "BoExioPriceMonitor/0.1 (+contact: boexio-ops@example.com)"
+DEFAULT_CONTACT_EMAIL = "boexio-ops@example.com"
+USER_AGENT = (
+    f"BoExioPriceMonitor/{PARSER_VERSION} "
+    f"(+contact: {os.environ.get('BOEXIO_CONTACT_EMAIL', DEFAULT_CONTACT_EMAIL)})"
+)
 ALLOWED_HOST = "www.boconcept.com"
 ALLOWED_INPUT_PREFIX = "/ja-jp/shop/"
 DISCOVERED_PRODUCT_PREFIX = "/ja-jp/p/"
@@ -177,7 +182,7 @@ def fetch_url(url: str, timeout: int) -> FetchResult:
         raise RuntimeError("TIMEOUT_READ: request timed out") from exc
     except URLError as exc:
         reason = str(exc.reason)
-        if "unknown url type: https" in reason:
+        if "unknown url type: https" in reason or "CERTIFICATE_VERIFY_FAILED" in reason:
             return fetch_url_with_curl(url, timeout, checked_at)
         code = "TIMEOUT_CONNECT" if "timed out" in reason.lower() else "UNKNOWN"
         raise RuntimeError(f"{code}: {reason}") from exc
@@ -314,6 +319,14 @@ def selected_option_id(html: str, attribute_id: str) -> str:
     return match.group(1) if match else ""
 
 
+def first_selected_option_id(html: str, attribute_ids: Iterable[str]) -> str:
+    for attribute_id in attribute_ids:
+        option_id = selected_option_id(html, attribute_id)
+        if option_id:
+            return option_id
+    return ""
+
+
 def option_name_for_id(html: str, option_id: str) -> str:
     if not option_id:
         return ""
@@ -340,11 +353,15 @@ def parse_product(product: FetchResult, raw_ref: str, run_id: str) -> dict[str, 
     prices = price_values_after(parser.texts, "希望小売価格")
     list_price = prices[0] if prices else ""
     display_price = prices[1] if len(prices) > 1 else list_price
+    canonical_price = list_price if "から" in display_price and list_price else display_price
     variant_url_key = escaped_json_value(product.html, "variantUrlKey")
     sku = escaped_json_value(product.html, "variantKey")
     json_price = escaped_json_number(product.html, "currentPrice")
     selected_leg_id = selected_option_id(product.html, "vaMaterialLeg")
-    selected_upholstery_id = selected_option_id(product.html, "vaMaterialUpholstery")
+    selected_upholstery_id = first_selected_option_id(
+        product.html,
+        ("vaMaterialUpholstery", "vaMaterialSeat"),
+    )
 
     return {
         "run_id": run_id,
@@ -362,7 +379,8 @@ def parse_product(product: FetchResult, raw_ref: str, run_id: str) -> dict[str, 
         "item_number": value_after(parser.texts, "アイテム番号"),
         "selected_size": "",
         "selected_upholstery": option_name_for_id(product.html, selected_upholstery_id)
-        or selected_value(parser.texts, "張地"),
+        or selected_value(parser.texts, "張地")
+        or selected_value(parser.texts, "座部"),
         "selected_leg": option_name_for_id(product.html, selected_leg_id) or selected_value(parser.texts, "脚"),
         "width_cm": value_after(parser.texts, "幅"),
         "depth_cm": value_after(parser.texts, "奥行"),
@@ -371,7 +389,7 @@ def parse_product(product: FetchResult, raw_ref: str, run_id: str) -> dict[str, 
         "material": extract_material(parser.texts),
         "list_price": list_price,
         "display_price": display_price,
-        "canonical_price": display_price,
+        "canonical_price": canonical_price,
         "price_from": "dom_text" if display_price else "embedded_json" if json_price else "",
         "currency": "JPY" if display_price else "",
         "tax_type": "tax_included" if display_price else "",
@@ -417,6 +435,14 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def relative_output_path(path: Path) -> str:
+    return path.as_posix()
+
+
+def collect_output_files(output_dir: Path) -> list[Path]:
+    return sorted(path for path in output_dir.rglob("*") if path.is_file())
 
 
 def commit_sha() -> str:
@@ -473,7 +499,8 @@ def run(args: argparse.Namespace) -> int:
     success_count = sum(1 for row in rows if row["scrape_status"] == "success")
     failure_count = sum(1 for row in rows if row["scrape_status"] == "failed")
     run_status = "success" if success_count and not failure_count else "partial_success" if success_count else "failed"
-    output_files = [str(csv_path), str(log_path)]
+    checksum_files = [csv_path, log_path, *collect_output_files(raw_dir)]
+    output_files = [*checksum_files, metadata_path]
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "parser_version": PARSER_VERSION,
@@ -482,13 +509,15 @@ def run(args: argparse.Namespace) -> int:
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "target_urls": target_urls,
-        "output_files": output_files,
-        "output_file_checksums": {str(path): sha256_file(Path(path)) for path in output_files},
+        "output_files": [relative_output_path(path) for path in output_files],
+        "output_file_checksums": {relative_output_path(path): sha256_file(path) for path in checksum_files},
         "run_status": run_status,
         "success_count": success_count,
         "failure_count": failure_count,
         "notes": [
-            "Phase 1 PoC: category URL is allowed input; discovered product URL under /ja-jp/p/ is fetched for product detail inspection."
+            "Phase 1 PoC: manual input is limited to /ja-jp/shop/ category URLs; discovered /ja-jp/p/ product URLs are allowed only when found from an allowed category page.",
+            "canonical_price is left blank when the displayed price is a from-price; display_price remains the raw visible price for Phase 1 evidence.",
+            "run_metadata.json is listed in output_files; its self-checksum is omitted to avoid self-referential metadata.",
         ],
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

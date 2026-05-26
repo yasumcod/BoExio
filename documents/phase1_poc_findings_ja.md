@@ -1,6 +1,7 @@
 # BoExio Phase 1 PoC 調査メモ
 
 作成日: 2026-05-21
+更新日: 2026-05-22
 
 ## 1. 調査対象
 
@@ -122,6 +123,30 @@ config/target_urls.txt
 
 - ローカル Python の `_ssl` が壊れているため、HTTPS 取得は `urllib` 失敗時に `curl` へフォールバックする。
 - 通常のサンドボックスでは DNS 解決が制限されるため、実取得にはネットワーク許可が必要。
+- 本番・定期実行環境では Python の HTTPS が利用できる環境を前提にし、`curl` フォールバックはローカル PoC 用の保険として扱う。
+- User-Agent は `BoExioPriceMonitor/<parser_version> (+contact: <BOEXIO_CONTACT_EMAIL>)` 形式とし、運用開始前に正式連絡先を設定する。
+
+## 5.2 Phase 1 仕上げで確定した仕様
+
+URL スコープ:
+
+- 手動投入 URL は `/ja-jp/shop/` 配下のカテゴリ URL に限定する。
+- カテゴリページから発見した商品詳細 URL に限り、`/ja-jp/p/` 配下の取得を許可する。
+- 手動投入された `/ja-jp/p/` URL は Phase 1 では対象外とする。
+- robots.txt の `*/p/*/print/` は引き続き除外する。
+
+価格列:
+
+- `display_price` は Phase 1 の証跡として、画面表示価格をそのまま記録する。
+- `canonical_price` は差分判定向けの価格を入れる。
+- `display_price` が「から」価格で `list_price` が取れる場合、Phase 2 以降は `list_price` を `canonical_price` に入れる。
+- Phase 2 以降の暫定差分対象は `canonical_price` とし、価格ソース、税区分、通貨が一致しない場合は Phase 4 で比較不可として扱う。
+
+metadata:
+
+- `output_files` には `products_poc.csv`、`scrape_log.txt`、`run_metadata.json`、raw capture を含める。
+- `output_file_checksums` には CSV、ログ、raw capture の SHA-256 を保存する。
+- `run_metadata.json` 自体は自己参照 checksum が安定しないため、checksum 対象から外す。
 
 ## 6. Phase 2 方針判断のための未確認事項
 

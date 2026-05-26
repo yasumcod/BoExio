@@ -1,0 +1,241 @@
+name: BoExio Weekly Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_limit:
+        description: "Maximum products to process in Phase 3"
+        required: false
+        default: "3"
+      variant_limit_per_product:
+        description: "Maximum variants per product to fetch in Phase 3"
+        required: false
+        default: "1"
+      request_interval:
+        description: "Seconds between network requests"
+        required: false
+        default: "5"
+      retries:
+        description: "Retries per URL for retryable failures"
+        required: false
+        default: "2"
+  schedule:
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: write
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+    env:
+      BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
+      BOEXIO_NOTIFY_WEBHOOK_URL: ${{ secrets.BOEXIO_NOTIFY_WEBHOOK_URL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare run variables
+        id: vars
+        shell: bash
+        run: |
+          run_date="$(date -u +%F)"
+          run_id="weekly-${run_date}-${GITHUB_RUN_ID}"
+          release_tag="weekly-${run_date}"
+          release_name="BoExio Weekly Report ${run_date}"
+          product_limit="${{ github.event.inputs.product_limit }}"
+          variant_limit_per_product="${{ github.event.inputs.variant_limit_per_product }}"
+          request_interval="${{ github.event.inputs.request_interval }}"
+          retries="${{ github.event.inputs.retries }}"
+          if [ -z "$product_limit" ]; then product_limit="3"; fi
+          if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="1"; fi
+          if [ -z "$request_interval" ]; then request_interval="5"; fi
+          if [ -z "$retries" ]; then retries="2"; fi
+          {
+            echo "run_date=$run_date"
+            echo "run_id=$run_id"
+            echo "phase3_run_id=${run_id}-phase3"
+            echo "phase4_run_id=${run_id}-phase4"
+            echo "phase5_run_id=${run_id}-phase5"
+            echo "release_tag=$release_tag"
+            echo "release_name=$release_name"
+            echo "product_limit=$product_limit"
+            echo "variant_limit_per_product=$variant_limit_per_product"
+            echo "request_interval=$request_interval"
+            echo "retries=$retries"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate workflow and Python
+        id: validation
+        shell: bash
+        run: |
+          mkdir -p logs
+          set +e
+          ruby -e 'require "yaml"; YAML.load_file(".github/workflows/boexio-weekly.yml")' 2>&1 | tee logs/workflow_yaml.log
+          workflow_yaml_exit="${PIPESTATUS[0]}"
+          python3 -m py_compile boexio/*.py scripts/*.py 2>&1 | tee logs/py_compile.log
+          py_compile_exit="${PIPESTATUS[0]}"
+          python3 -m unittest discover -s tests 2>&1 | tee logs/tests.log
+          tests_exit="${PIPESTATUS[0]}"
+          {
+            echo "workflow_yaml_exit=$workflow_yaml_exit"
+            echo "py_compile_exit=$py_compile_exit"
+            echo "tests_exit=$tests_exit"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download previous release CSV
+        id: previous
+        shell: bash
+        run: |
+          mkdir -p previous logs
+          set +e
+          current_tag="${{ steps.vars.outputs.release_tag }}"
+          previous_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --jq "map(select(.draft == false and .tag_name != \"${current_tag}\")) | .[0].tag_name // \"\"" 2>> logs/previous_release.log)"
+          if [ -n "$previous_tag" ] && [ "$previous_tag" != "${{ steps.vars.outputs.release_tag }}" ]; then
+            gh release download "$previous_tag" --pattern "phase3_products_current.csv" --dir previous >> logs/previous_release.log 2>&1
+            gh release download "$previous_tag" --pattern "phase3_run_metadata.json" --dir previous >> logs/previous_release.log 2>&1
+          else
+            previous_tag=""
+            echo "No previous release found." >> logs/previous_release.log
+          fi
+          python3 scripts/phase6_workflow.py prepare-previous \
+            --downloaded-csv previous/phase3_products_current.csv \
+            --output-csv previous/previous_products_current.csv \
+            --downloaded-metadata previous/phase3_run_metadata.json \
+            --output-metadata previous/previous_run_metadata.json >> logs/previous_release.log 2>&1
+          {
+            echo "previous_tag=$previous_tag"
+            echo "previous_csv=previous/previous_products_current.csv"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Phase 3, Phase 4, and Phase 5
+        id: phases
+        shell: bash
+        run: |
+          mkdir -p logs
+          set +e
+          phase3_dir="data/runs/${{ steps.vars.outputs.phase3_run_id }}"
+          phase4_dir="data/runs/${{ steps.vars.outputs.phase4_run_id }}"
+          phase5_dir="data/runs/${{ steps.vars.outputs.phase5_run_id }}"
+
+          python3 scripts/phase3_master.py \
+            --run-id "${{ steps.vars.outputs.phase3_run_id }}" \
+            --product-limit "${{ steps.vars.outputs.product_limit }}" \
+            --variant-limit-per-product "${{ steps.vars.outputs.variant_limit_per_product }}" \
+            --request-interval "${{ steps.vars.outputs.request_interval }}" \
+            --retries "${{ steps.vars.outputs.retries }}" 2>&1 | tee logs/phase3.log
+          phase3_exit="${PIPESTATUS[0]}"
+
+          previous_metadata_args=()
+          if [ -f previous/previous_run_metadata.json ]; then
+            previous_metadata_args=(--previous-metadata previous/previous_run_metadata.json)
+          fi
+          if [ -f "$phase3_dir/products_current.csv" ]; then
+            python3 scripts/phase4_diff.py \
+              --run-id "${{ steps.vars.outputs.phase4_run_id }}" \
+              --previous-csv "${{ steps.previous.outputs.previous_csv }}" \
+              --current-csv "$phase3_dir/products_current.csv" \
+              "${previous_metadata_args[@]}" \
+              --current-metadata "$phase3_dir/run_metadata.json" 2>&1 | tee logs/phase4.log
+            phase4_exit="${PIPESTATUS[0]}"
+          else
+            echo "Phase 4 skipped because Phase 3 products_current.csv was not generated." | tee logs/phase4.log
+            phase4_exit="1"
+          fi
+
+          if [ -f "$phase4_dir/diff_summary.json" ]; then
+            python3 scripts/phase5_report.py \
+              --run-id "${{ steps.vars.outputs.phase5_run_id }}" \
+              --diff-run-dir "$phase4_dir" \
+              --current-master "$phase3_dir/products_current.csv" 2>&1 | tee logs/phase5.log
+            phase5_exit="${PIPESTATUS[0]}"
+          else
+            echo "Phase 5 skipped because Phase 4 diff_summary.json was not generated." | tee logs/phase5.log
+            phase5_exit="1"
+          fi
+
+          {
+            echo "phase3_exit=$phase3_exit"
+            echo "phase4_exit=$phase4_exit"
+            echo "phase5_exit=$phase5_exit"
+            echo "phase3_dir=$phase3_dir"
+            echo "phase4_dir=$phase4_dir"
+            echo "phase5_dir=$phase5_dir"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage artifacts
+        id: stage
+        if: always()
+        shell: bash
+        run: |
+          python3 scripts/phase6_workflow.py stage \
+            --run-id "${{ steps.vars.outputs.run_id }}" \
+            --run-date "${{ steps.vars.outputs.run_date }}" \
+            --release-tag "${{ steps.vars.outputs.release_tag }}" \
+            --release-name "${{ steps.vars.outputs.release_name }}" \
+            --previous-release-tag "${{ steps.previous.outputs.previous_tag }}" \
+            --previous-csv "${{ steps.previous.outputs.previous_csv }}" \
+            --phase3-dir "${{ steps.phases.outputs.phase3_dir }}" \
+            --phase4-dir "${{ steps.phases.outputs.phase4_dir }}" \
+            --phase5-dir "${{ steps.phases.outputs.phase5_dir }}" \
+            --logs-dir logs \
+            --output-dir artifacts \
+            --workflow-yaml-exit-code "${{ steps.validation.outputs.workflow_yaml_exit }}" \
+            --py-compile-exit-code "${{ steps.validation.outputs.py_compile_exit }}" \
+            --tests-exit-code "${{ steps.validation.outputs.tests_exit }}" \
+            --phase3-exit-code "${{ steps.phases.outputs.phase3_exit }}" \
+            --phase4-exit-code "${{ steps.phases.outputs.phase4_exit }}" \
+            --phase5-exit-code "${{ steps.phases.outputs.phase5_exit }}"
+          run_status="$(python3 -c 'import json; print(json.load(open("artifacts/phase6_metadata.json"))["overall_run_status"])')"
+          echo "run_status=$run_status" >> "$GITHUB_OUTPUT"
+
+      - name: Upload GitHub Actions artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boexio-weekly-${{ steps.vars.outputs.run_date }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Publish GitHub Release assets
+        if: always()
+        shell: bash
+        run: |
+          release_tag="${{ steps.vars.outputs.release_tag }}"
+          release_name="${{ steps.vars.outputs.release_name }}"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
+          else
+            gh release create "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
+          fi
+          gh release upload "$release_tag" artifacts/* --clobber
+
+      - name: Send notification
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ -z "$BOEXIO_NOTIFY_WEBHOOK_URL" ]; then
+            echo "BOEXIO_NOTIFY_WEBHOOK_URL is not set; skipping notification."
+            exit 0
+          fi
+          python3 scripts/phase6_workflow.py notify \
+            --webhook-url "$BOEXIO_NOTIFY_WEBHOOK_URL" \
+            --metadata artifacts/phase6_metadata.json \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.vars.outputs.release_tag }}"
+
+      - name: Fail workflow when run_status is not success
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.stage.outputs.run_status }}" = "success" ]; then
+            exit 0
+          fi
+          echo "BoExio weekly report finished with run_status=${{ steps.stage.outputs.run_status }}"
+          exit 1

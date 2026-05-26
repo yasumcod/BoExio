@@ -1,0 +1,97 @@
+import csv
+import json
+import tempfile
+import unittest
+from datetime import date
+from pathlib import Path
+
+from boexio.phase2_variants import PHASE2_CSV_COLUMNS
+from boexio.phase6_workflow import (
+    PhaseResult,
+    overall_run_status,
+    prepare_previous,
+    release_name_for_date,
+    release_tag_for_date,
+    stage_phase_outputs,
+    write_empty_previous_csv,
+)
+
+
+class Phase6WorkflowTests(unittest.TestCase):
+    def test_release_names_use_weekly_date(self):
+        run_date = date(2026, 5, 24)
+
+        self.assertEqual("weekly-2026-05-24", release_tag_for_date(run_date))
+        self.assertEqual("BoExio Weekly Report 2026-05-24", release_name_for_date(run_date))
+
+    def test_empty_previous_csv_uses_phase2_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "previous.csv"
+
+            write_empty_previous_csv(path)
+
+            with path.open(encoding="utf-8", newline="") as file:
+                reader = csv.DictReader(file)
+                self.assertEqual(PHASE2_CSV_COLUMNS, reader.fieldnames)
+                self.assertEqual([], list(reader))
+
+    def test_prepare_previous_copies_downloaded_csv_and_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded_csv = root / "downloaded.csv"
+            downloaded_metadata = root / "downloaded.json"
+            output_csv = root / "out" / "previous.csv"
+            output_metadata = root / "out" / "previous.json"
+            downloaded_csv.write_text("a,b\n1,2\n", encoding="utf-8")
+            downloaded_metadata.write_text('{"schema_version":"0.1.0"}\n', encoding="utf-8")
+
+            prepare_previous(downloaded_csv, output_csv, downloaded_metadata, output_metadata)
+
+            self.assertEqual(downloaded_csv.read_text(encoding="utf-8"), output_csv.read_text(encoding="utf-8"))
+            self.assertEqual(
+                downloaded_metadata.read_text(encoding="utf-8"),
+                output_metadata.read_text(encoding="utf-8"),
+            )
+
+    def test_overall_status_fails_on_validation_or_phase_failure(self):
+        result = PhaseResult("phase3", Path("x"), 0, "success", Path("x/run_metadata.json"))
+
+        self.assertEqual("success", overall_run_status([result], {"tests": 0}))
+        self.assertEqual("failed", overall_run_status([result], {"tests": 1}))
+        self.assertEqual(
+            "failed",
+            overall_run_status([PhaseResult("phase3", Path("x"), 0, "failed", None)], {"tests": 0}),
+        )
+        self.assertEqual(
+            "partial_success",
+            overall_run_status([PhaseResult("phase3", Path("x"), 0, "partial_success", None)], {"tests": 0}),
+        )
+
+    def test_stage_phase_outputs_copies_stable_asset_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            phase3 = root / "phase3"
+            phase4 = root / "phase4"
+            phase5 = root / "phase5"
+            logs = root / "logs"
+            out = root / "artifacts"
+            for path in (phase3, phase4, phase5, logs):
+                path.mkdir()
+            (phase3 / "products_current.csv").write_text("current\n", encoding="utf-8")
+            (phase3 / "products_2026-05-24_run.csv").write_text("snapshot\n", encoding="utf-8")
+            (phase3 / "run_metadata.json").write_text(json.dumps({"run_status": "success"}), encoding="utf-8")
+            (phase4 / "diff_summary.json").write_text("{}\n", encoding="utf-8")
+            (phase5 / "weekly_report_2026-05-24_run.xlsx").write_bytes(b"fake")
+            (logs / "phase3.log").write_text("log\n", encoding="utf-8")
+
+            copied = stage_phase_outputs(phase3, phase4, phase5, logs, out)
+
+            self.assertIn("phase3_products_current.csv", copied)
+            self.assertIn("phase3_products_snapshot.csv", copied)
+            self.assertIn("phase4_diff_summary.json", copied)
+            self.assertIn("phase5_weekly_report.xlsx", copied)
+            self.assertIn("workflow_phase3.log", copied)
+
+
+if __name__ == "__main__":
+    unittest.main()
