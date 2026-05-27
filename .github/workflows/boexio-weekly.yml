@@ -8,21 +8,33 @@ on:
         required: false
         default: "0"
       product_limit_per_category:
-        description: "Maximum products to process per category in Phase 3"
+        description: "Maximum products to discover per category; 0 means all products"
         required: false
         default: "3"
       variant_limit_per_product:
-        description: "Maximum variants per product to fetch in Phase 3"
+        description: "Maximum variants per product to fetch in Phase 3; 0 means all variants"
         required: false
         default: "1"
+      chunk_size:
+        description: "Products per scrape matrix chunk"
+        required: false
+        default: "5"
       request_interval:
-        description: "Seconds between network requests"
+        description: "Seconds between network requests inside each job"
         required: false
         default: "5"
       retries:
         description: "Retries per URL for retryable failures"
         required: false
         default: "2"
+      category_slug:
+        description: "Optional category_slug filter for rerun planning; blank means all enabled categories"
+        required: false
+        default: ""
+      chunk_slug:
+        description: "Optional chunk_slug filter for rerun planning; blank means all discovered chunks"
+        required: false
+        default: ""
   schedule:
     - cron: "0 6 * * 0"
 
@@ -30,12 +42,28 @@ permissions:
   contents: write
 
 jobs:
-  weekly-report:
+  discover-categories:
     runs-on: ubuntu-latest
-    env:
-      BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
-      BOEXIO_NOTIFY_WEBHOOK_URL: ${{ secrets.BOEXIO_NOTIFY_WEBHOOK_URL }}
-      GH_TOKEN: ${{ github.token }}
+    outputs:
+      run_date: ${{ steps.vars.outputs.run_date }}
+      run_id: ${{ steps.vars.outputs.run_id }}
+      phase3_run_id: ${{ steps.vars.outputs.phase3_run_id }}
+      phase4_run_id: ${{ steps.vars.outputs.phase4_run_id }}
+      phase5_run_id: ${{ steps.vars.outputs.phase5_run_id }}
+      release_tag: ${{ steps.vars.outputs.release_tag }}
+      release_name: ${{ steps.vars.outputs.release_name }}
+      product_limit: ${{ steps.vars.outputs.product_limit }}
+      product_limit_per_category: ${{ steps.vars.outputs.product_limit_per_category }}
+      variant_limit_per_product: ${{ steps.vars.outputs.variant_limit_per_product }}
+      chunk_size: ${{ steps.vars.outputs.chunk_size }}
+      request_interval: ${{ steps.vars.outputs.request_interval }}
+      retries: ${{ steps.vars.outputs.retries }}
+      category_slug: ${{ steps.vars.outputs.category_slug }}
+      chunk_slug: ${{ steps.vars.outputs.chunk_slug }}
+      category_matrix: ${{ steps.category_matrix.outputs.category_matrix }}
+      workflow_yaml_exit: ${{ steps.validation.outputs.workflow_yaml_exit }}
+      py_compile_exit: ${{ steps.validation.outputs.py_compile_exit }}
+      tests_exit: ${{ steps.validation.outputs.tests_exit }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -56,13 +84,19 @@ jobs:
           product_limit="${{ github.event.inputs.product_limit }}"
           product_limit_per_category="${{ github.event.inputs.product_limit_per_category }}"
           variant_limit_per_product="${{ github.event.inputs.variant_limit_per_product }}"
+          chunk_size="${{ github.event.inputs.chunk_size }}"
           request_interval="${{ github.event.inputs.request_interval }}"
           retries="${{ github.event.inputs.retries }}"
+          category_slug="${{ github.event.inputs.category_slug }}"
+          chunk_slug="${{ github.event.inputs.chunk_slug }}"
           if [ -z "$product_limit" ]; then product_limit="0"; fi
           if [ -z "$product_limit_per_category" ]; then product_limit_per_category="3"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="1"; fi
+          if [ -z "$chunk_size" ]; then chunk_size="5"; fi
           if [ -z "$request_interval" ]; then request_interval="5"; fi
           if [ -z "$retries" ]; then retries="2"; fi
+          if [ -z "$category_slug" ]; then category_slug=""; fi
+          if [ -z "$chunk_slug" ]; then chunk_slug=""; fi
           {
             echo "run_date=$run_date"
             echo "run_id=$run_id"
@@ -74,8 +108,11 @@ jobs:
             echo "product_limit=$product_limit"
             echo "product_limit_per_category=$product_limit_per_category"
             echo "variant_limit_per_product=$variant_limit_per_product"
+            echo "chunk_size=$chunk_size"
             echo "request_interval=$request_interval"
             echo "retries=$retries"
+            echo "category_slug=$category_slug"
+            echo "chunk_slug=$chunk_slug"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate workflow and Python
@@ -96,15 +133,172 @@ jobs:
             echo "tests_exit=$tests_exit"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Generate category matrix
+        id: category_matrix
+        shell: bash
+        run: |
+          mkdir -p matrix
+          python3 scripts/phase3_matrix.py categories --output matrix/category_matrix.json
+          matrix_json="$(python3 -c 'import json; print(json.dumps(json.load(open("matrix/category_matrix.json")), ensure_ascii=False))')"
+          echo "category_matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+
+      - name: Upload category matrix artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boexio-weekly-categories-${{ steps.vars.outputs.run_date }}
+          path: |
+            matrix/
+            logs/
+          retention-days: 30
+
+  discover-products:
+    runs-on: ubuntu-latest
+    needs: discover-categories
+    outputs:
+      chunk_matrix: ${{ steps.chunk_matrix.outputs.chunk_matrix }}
+    env:
+      BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Discover product URLs and chunk matrix
+        id: chunk_matrix
+        shell: bash
+        run: |
+          mkdir -p matrix
+          set +e
+          python3 scripts/phase3_matrix.py discover-products \
+            --run-id "${{ needs.discover-categories.outputs.run_id }}-discover-products" \
+            --product-limit "${{ needs.discover-categories.outputs.product_limit }}" \
+            --product-limit-per-category "${{ needs.discover-categories.outputs.product_limit_per_category }}" \
+            --chunk-size "${{ needs.discover-categories.outputs.chunk_size }}" \
+            --request-interval "${{ needs.discover-categories.outputs.request_interval }}" \
+            --retries "${{ needs.discover-categories.outputs.retries }}" \
+            --category-slug "${{ needs.discover-categories.outputs.category_slug }}" \
+            --chunk-slug "${{ needs.discover-categories.outputs.chunk_slug }}" 2>&1 | tee matrix/discover_products_stdout.log
+          discover_exit="${PIPESTATUS[0]}"
+          matrix_json="$(python3 -c 'import json; print(json.dumps(json.load(open("matrix/chunk_matrix.json")), ensure_ascii=False))')"
+          echo "chunk_matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+          echo "discover_exit=$discover_exit" >> "$GITHUB_OUTPUT"
+
+      - name: Upload product matrix artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}
+          path: matrix/
+          retention-days: 30
+
+  scrape-product-chunk:
+    runs-on: ubuntu-latest
+    needs:
+      - discover-categories
+      - discover-products
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.discover-products.outputs.chunk_matrix) }}
+    env:
+      BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download product matrix artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}
+          path: matrix
+
+      - name: Scrape product chunk
+        id: scrape
+        shell: bash
+        run: |
+          set +e
+          chunk_run_id="${{ needs.discover-categories.outputs.run_id }}-phase3-${{ matrix.chunk_slug }}"
+          mkdir -p "data/runs/${chunk_run_id}"
+          python3 scripts/phase3_master.py \
+            --run-id "$chunk_run_id" \
+            --category-name "${{ matrix.category_name }}" \
+            --category-url "${{ matrix.category_url }}" \
+            --category-slug "${{ matrix.category_slug }}" \
+            --chunk-index "${{ matrix.chunk_index }}" \
+            --chunk-slug "${{ matrix.chunk_slug }}" \
+            --product-urls-file "${{ matrix.product_urls_file }}" \
+            --product-limit "0" \
+            --product-limit-per-category "0" \
+            --variant-limit-per-product "${{ needs.discover-categories.outputs.variant_limit_per_product }}" \
+            --request-interval "${{ needs.discover-categories.outputs.request_interval }}" \
+            --retries "${{ needs.discover-categories.outputs.retries }}" 2>&1 | tee "data/runs/${chunk_run_id}/workflow_chunk.log"
+          phase3_exit="${PIPESTATUS[0]}"
+          echo "phase3_exit=$phase3_exit" >> "$GITHUB_OUTPUT"
+          echo "chunk_run_id=$chunk_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload chunk artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-${{ matrix.chunk_slug }}
+          path: data/runs/${{ steps.scrape.outputs.chunk_run_id }}/
+          retention-days: 30
+
+  merge-report:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - discover-categories
+      - discover-products
+      - scrape-product-chunk
+    env:
+      BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
+      BOEXIO_NOTIFY_WEBHOOK_URL: ${{ secrets.BOEXIO_NOTIFY_WEBHOOK_URL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download product matrix artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}
+          path: matrix
+
+      - name: Download chunk artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-*
+          path: chunk_artifacts
+
       - name: Download previous release CSV
         id: previous
         shell: bash
         run: |
           mkdir -p previous logs
           set +e
-          current_tag="${{ steps.vars.outputs.release_tag }}"
+          current_tag="${{ needs.discover-categories.outputs.release_tag }}"
           previous_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --jq "map(select(.draft == false and .tag_name != \"${current_tag}\")) | .[0].tag_name // \"\"" 2>> logs/previous_release.log)"
-          if [ -n "$previous_tag" ] && [ "$previous_tag" != "${{ steps.vars.outputs.release_tag }}" ]; then
+          if [ -n "$previous_tag" ] && [ "$previous_tag" != "$current_tag" ]; then
             gh release download "$previous_tag" --pattern "phase3_products_current.csv" --dir previous >> logs/previous_release.log 2>&1
             gh release download "$previous_tag" --pattern "phase3_run_metadata.json" --dir previous >> logs/previous_release.log 2>&1
           else
@@ -121,23 +315,21 @@ jobs:
             echo "previous_csv=previous/previous_products_current.csv"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Run Phase 3, Phase 4, and Phase 5
+      - name: Merge chunks, run Phase 4 and Phase 5
         id: phases
         shell: bash
         run: |
           mkdir -p logs
           set +e
-          phase3_dir="data/runs/${{ steps.vars.outputs.phase3_run_id }}"
-          phase4_dir="data/runs/${{ steps.vars.outputs.phase4_run_id }}"
-          phase5_dir="data/runs/${{ steps.vars.outputs.phase5_run_id }}"
+          phase3_dir="data/runs/${{ needs.discover-categories.outputs.phase3_run_id }}"
+          phase4_dir="data/runs/${{ needs.discover-categories.outputs.phase4_run_id }}"
+          phase5_dir="data/runs/${{ needs.discover-categories.outputs.phase5_run_id }}"
 
-          python3 scripts/phase3_master.py \
-            --run-id "${{ steps.vars.outputs.phase3_run_id }}" \
-            --product-limit "${{ steps.vars.outputs.product_limit }}" \
-            --product-limit-per-category "${{ steps.vars.outputs.product_limit_per_category }}" \
-            --variant-limit-per-product "${{ steps.vars.outputs.variant_limit_per_product }}" \
-            --request-interval "${{ steps.vars.outputs.request_interval }}" \
-            --retries "${{ steps.vars.outputs.retries }}" 2>&1 | tee logs/phase3.log
+          python3 scripts/phase3_merge.py \
+            --run-id "${{ needs.discover-categories.outputs.phase3_run_id }}" \
+            --chunks-dir chunk_artifacts \
+            --matrix-json matrix/chunk_matrix.json \
+            --discovery-metadata matrix/run_metadata.json 2>&1 | tee logs/phase3_merge.log
           phase3_exit="${PIPESTATUS[0]}"
 
           previous_metadata_args=()
@@ -146,20 +338,20 @@ jobs:
           fi
           if [ -f "$phase3_dir/products_current.csv" ]; then
             python3 scripts/phase4_diff.py \
-              --run-id "${{ steps.vars.outputs.phase4_run_id }}" \
+              --run-id "${{ needs.discover-categories.outputs.phase4_run_id }}" \
               --previous-csv "${{ steps.previous.outputs.previous_csv }}" \
               --current-csv "$phase3_dir/products_current.csv" \
               "${previous_metadata_args[@]}" \
               --current-metadata "$phase3_dir/run_metadata.json" 2>&1 | tee logs/phase4.log
             phase4_exit="${PIPESTATUS[0]}"
           else
-            echo "Phase 4 skipped because Phase 3 products_current.csv was not generated." | tee logs/phase4.log
+            echo "Phase 4 skipped because merged Phase 3 products_current.csv was not generated." | tee logs/phase4.log
             phase4_exit="1"
           fi
 
           if [ -f "$phase4_dir/diff_summary.json" ]; then
             python3 scripts/phase5_report.py \
-              --run-id "${{ steps.vars.outputs.phase5_run_id }}" \
+              --run-id "${{ needs.discover-categories.outputs.phase5_run_id }}" \
               --diff-run-dir "$phase4_dir" \
               --current-master "$phase3_dir/products_current.csv" 2>&1 | tee logs/phase5.log
             phase5_exit="${PIPESTATUS[0]}"
@@ -183,10 +375,10 @@ jobs:
         shell: bash
         run: |
           python3 scripts/phase6_workflow.py stage \
-            --run-id "${{ steps.vars.outputs.run_id }}" \
-            --run-date "${{ steps.vars.outputs.run_date }}" \
-            --release-tag "${{ steps.vars.outputs.release_tag }}" \
-            --release-name "${{ steps.vars.outputs.release_name }}" \
+            --run-id "${{ needs.discover-categories.outputs.run_id }}" \
+            --run-date "${{ needs.discover-categories.outputs.run_date }}" \
+            --release-tag "${{ needs.discover-categories.outputs.release_tag }}" \
+            --release-name "${{ needs.discover-categories.outputs.release_name }}" \
             --previous-release-tag "${{ steps.previous.outputs.previous_tag }}" \
             --previous-csv "${{ steps.previous.outputs.previous_csv }}" \
             --phase3-dir "${{ steps.phases.outputs.phase3_dir }}" \
@@ -194,9 +386,9 @@ jobs:
             --phase5-dir "${{ steps.phases.outputs.phase5_dir }}" \
             --logs-dir logs \
             --output-dir artifacts \
-            --workflow-yaml-exit-code "${{ steps.validation.outputs.workflow_yaml_exit }}" \
-            --py-compile-exit-code "${{ steps.validation.outputs.py_compile_exit }}" \
-            --tests-exit-code "${{ steps.validation.outputs.tests_exit }}" \
+            --workflow-yaml-exit-code "${{ needs.discover-categories.outputs.workflow_yaml_exit }}" \
+            --py-compile-exit-code "${{ needs.discover-categories.outputs.py_compile_exit }}" \
+            --tests-exit-code "${{ needs.discover-categories.outputs.tests_exit }}" \
             --phase3-exit-code "${{ steps.phases.outputs.phase3_exit }}" \
             --phase4-exit-code "${{ steps.phases.outputs.phase4_exit }}" \
             --phase5-exit-code "${{ steps.phases.outputs.phase5_exit }}"
@@ -207,7 +399,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: boexio-weekly-${{ steps.vars.outputs.run_date }}
+          name: boexio-weekly-${{ needs.discover-categories.outputs.run_date }}
           path: artifacts/
           retention-days: 30
 
@@ -234,8 +426,8 @@ jobs:
             done
           }
 
-          release_tag="${{ steps.vars.outputs.release_tag }}"
-          release_name="${{ steps.vars.outputs.release_name }}"
+          release_tag="${{ needs.discover-categories.outputs.release_tag }}"
+          release_name="${{ needs.discover-categories.outputs.release_name }}"
           if gh release view "$release_tag" >/dev/null 2>&1; then
             retry_gh gh release edit "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
           else
@@ -255,7 +447,7 @@ jobs:
           python3 scripts/phase6_workflow.py notify \
             --webhook-url "$BOEXIO_NOTIFY_WEBHOOK_URL" \
             --metadata artifacts/phase6_metadata.json \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.vars.outputs.release_tag }}"
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ needs.discover-categories.outputs.release_tag }}"
 
       - name: Fail workflow when run_status is not success
         if: always()

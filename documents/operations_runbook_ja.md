@@ -32,6 +32,13 @@
 3. workflow log
 4. GitHub Actions の job summary と failed step
 
+カテゴリ分割実行を導入した後は、次も確認する。
+
+- 欠落カテゴリまたは欠落チャンクがないか。
+- `merge-report` job が全チャンク artifact を取得できているか。
+- チャンク別 `run_metadata.json` の失敗率、schema mismatch 件数、403、captcha、challenge の有無。
+- `max-parallel` が 2 のまま運用されているか。
+
 ## 3. 停止後の再開手順
 
 自動停止、captcha/challenge 検知、403 増加、schema mismatch、GitHub Actions 障害のいずれかで停止した場合は、即時に連続再実行しない。
@@ -45,6 +52,21 @@
 5. 403、captcha、challenge の場合は、同日中の再実行を避け、翌営業日以降に 1 商品・1 variant の手動実行で確認する。
 6. 手動実行は `workflow_dispatch` で `product_limit_per_category=1`、`variant_limit_per_product=1`、`request_interval=5` 以上から再開する。全体上限をさらに絞る場合だけ `product_limit` に正の値を指定する。
 7. smoke run が成功した場合のみ、通常の上限値で再実行する。
+
+カテゴリ分割実行後の再開手順:
+
+1. 欠落または失敗した `category_slug` / `chunk_slug` を確認する。
+2. 失敗カテゴリまたは失敗チャンクだけを `workflow_dispatch` で再実行する。`category_slug` と `chunk_slug` を指定できる。`chunk_slug` だけで再実行する場合も、可能な限り対応する `category_slug` を併せて指定する。
+3. 再実行結果を集約 job で結合し、Release 更新は集約 job のみで行う。
+4. 403、captcha、challenge が出た場合は `max-parallel` を増やさず、必要なら 1 へ下げる。
+5. `variant_limit_per_product=0` は全パターン取得を意味するため、再開確認ではまず `1` を指定する。
+
+カテゴリ分割実行の status 判断:
+
+- 全チャンク成功: `overall_run_status=success`
+- 必須カテゴリ欠落、商品数 0 のカテゴリ、期待チャンク artifact 欠落: `overall_run_status=failed`
+- チャンク artifact が存在し、チャンク内に取得失敗がある場合: `overall_run_status=partial_success`
+- 重複 `variant_key` / `source_url` は最初の行を採用し、重複を `errors.csv` に記録する。この場合は `partial_success` として確認対象にする。
 
 再開判断の記録先:
 
@@ -86,6 +108,17 @@
 
 - 対象 URL が Disallow に該当する場合は取得を停止する。
 - 利用規約に自動取得禁止が明記された場合は取得を停止し、運用責任者に確認する。
+
+## 5.1 並列数変更の判断
+
+`scrape-product-chunk` の初期設定は `max-parallel: 2` とする。
+
+増やす場合の判断基準:
+
+- 403、captcha、challenge が発生していない。
+- `max-parallel: 2` の安定 run が 2 回以上続いている。
+- `request_interval` と並列数を掛け合わせたサイト全体の実効アクセス頻度が許容できる。
+- 重いカテゴリや 100 パターン以上の商品が多い場合は、並列数を増やすより先に `chunk_size` を下げる。
 
 ## 6. 障害時の復旧目標
 

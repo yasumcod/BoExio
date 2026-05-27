@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,20 @@ MAX_SCHEMA_MISMATCH_COUNT = 3
 class CategoryTarget:
     name: str
     url: str
+    slug: str = ""
+
+
+CATEGORY_SLUG_OVERRIDES = {
+    "チェア": "chair",
+    "ソファ": "sofa",
+    "テーブル": "table",
+    "ベッド": "bed",
+    "収納": "storage",
+    "ランプ": "lamp",
+    "ラグ": "rug",
+    "アクセサリー": "accessories",
+    "アウトドア家具": "outdoor-furniture",
+}
 
 
 @dataclass
@@ -88,6 +104,20 @@ def normalize_category_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
 
 
+def category_slug(category_name: str, category_url: str) -> str:
+    name = unicodedata.normalize("NFKC", category_name).strip()
+    if name in CATEGORY_SLUG_OVERRIDES:
+        return CATEGORY_SLUG_OVERRIDES[name]
+
+    tail = unquote(urlparse(category_url).path.rstrip("/").split("/")[-1])
+    source = unicodedata.normalize("NFKC", tail or name).strip().lower()
+    ascii_slug = re.sub(r"[^a-z0-9]+", "-", source.encode("ascii", "ignore").decode("ascii")).strip("-")
+    if ascii_slug:
+        return ascii_slug[:80]
+    digest_source = f"{name}\n{normalize_category_url(category_url)}".encode("utf-8")
+    return f"category-{hashlib.sha1(digest_source).hexdigest()[:10]}"
+
+
 def read_target_categories(path: Path) -> list[CategoryTarget]:
     text = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".csv":
@@ -101,13 +131,42 @@ def read_target_categories(path: Path) -> list[CategoryTarget]:
             if not url:
                 continue
             name = row.get("category_name", "").strip() or infer_category_name(url)
-            targets.append(CategoryTarget(name=name, url=url))
+            slug = row.get("category_slug", "").strip() or category_slug(name, url)
+            targets.append(CategoryTarget(name=name, url=url, slug=slug))
         return targets
 
     return [
-        CategoryTarget(name=infer_category_name(url), url=normalize_category_url(url))
+        CategoryTarget(
+            name=infer_category_name(url),
+            url=normalize_category_url(url),
+            slug=category_slug(infer_category_name(url), normalize_category_url(url)),
+        )
         for url in read_target_urls(path)
     ]
+
+
+def category_from_args(args: argparse.Namespace) -> CategoryTarget:
+    url = normalize_category_url(args.category_url.strip())
+    name = args.category_name.strip() or infer_category_name(url)
+    slug = args.category_slug.strip() or category_slug(name, url)
+    return CategoryTarget(name=name, url=url, slug=slug)
+
+
+def read_product_urls_file(path: Path) -> list[str]:
+    product_urls: list[str] = []
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        valid, error_code = validate_discovered_product_url(value)
+        if not valid:
+            raise ValueError(f"{error_code}: product URL is not allowed: {value}")
+        if value in seen:
+            continue
+        seen.add(value)
+        product_urls.append(value)
+    return product_urls
 
 
 def collect_product_urls(category_url: str, html: str) -> list[str]:
@@ -294,6 +353,13 @@ def select_products_by_category(
     return selected
 
 
+def select_variant_candidates(candidates: list[VariantCandidate], limit_per_product: int) -> list[VariantCandidate]:
+    valid_candidates = [candidate for candidate in candidates if candidate.candidate_status == "pending"]
+    if limit_per_product <= 0:
+        return valid_candidates
+    return valid_candidates[:limit_per_product]
+
+
 def run(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc)
     run_id = args.run_id or started_at.strftime("%Y%m%dT%H%M%SZ")
@@ -302,7 +368,12 @@ def run(args: argparse.Namespace) -> int:
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     limiter = RateLimiter(interval_seconds=args.request_interval)
-    target_categories = read_target_categories(Path(args.targets))
+    if args.product_urls_file:
+        if not args.category_url:
+            raise ValueError("--category-url is required when --product-urls-file is specified")
+        target_categories = [category_from_args(args)]
+    else:
+        target_categories = read_target_categories(Path(args.targets))
     logs: list[str] = []
     rows: list[dict[str, str]] = []
     candidates: list[VariantCandidate] = []
@@ -316,7 +387,29 @@ def run(args: argparse.Namespace) -> int:
         category_products_by_url: dict[str, list[str]] = {}
         product_category_by_url: dict[str, CategoryTarget] = {}
         seen_products: set[str] = set()
+        if args.product_urls_file:
+            target = target_categories[0]
+            product_urls = read_product_urls_file(Path(args.product_urls_file))
+            category_products_by_url[target.url] = product_urls
+            for product_url in product_urls:
+                product_category_by_url[product_url] = target
+                discovered_rows.append(
+                    {
+                        "run_id": run_id,
+                        "category_name": target.name,
+                        "category_url": target.url,
+                        "product_url": product_url,
+                        "discovery_status": "success",
+                        "discovery_error": "",
+                    }
+                )
+            logs.append(
+                f"product_urls_file={args.product_urls_file} category_name={target.name} "
+                f"category_url={target.url} product_url_count={len(product_urls)}"
+            )
         for category_index, target in enumerate(target_categories, start=1):
+            if args.product_urls_file:
+                break
             target_url = target.url
             valid, error_code = validate_input_url(target_url)
             if not valid:
@@ -404,13 +497,8 @@ def run(args: argparse.Namespace) -> int:
                 product_candidate_counts[product_url] = len(product_candidates)
                 candidates.extend(product_candidates)
 
-                valid_candidates = [
-                    candidate for candidate in product_candidates if candidate.candidate_status == "pending"
-                ]
-                for candidate_index, candidate in enumerate(
-                    valid_candidates[: args.variant_limit_per_product],
-                    start=1,
-                ):
+                selected_candidates = select_variant_candidates(product_candidates, args.variant_limit_per_product)
+                for candidate_index, candidate in enumerate(selected_candidates, start=1):
                     try:
                         variant_page = fetch_with_control(
                             candidate.variant_url,
@@ -500,8 +588,16 @@ def run(args: argparse.Namespace) -> int:
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "target_urls": [target.url for target in target_categories],
         "target_categories": [
-            {"category_name": target.name, "category_url": target.url} for target in target_categories
+            {"category_name": target.name, "category_url": target.url, "category_slug": target.slug}
+            for target in target_categories
         ],
+        "category_name": target_categories[0].name if len(target_categories) == 1 else args.category_name,
+        "category_url": target_categories[0].url if len(target_categories) == 1 else args.category_url,
+        "category_slug": args.category_slug or (target_categories[0].slug if len(target_categories) == 1 else ""),
+        "chunk_slug": args.chunk_slug,
+        "chunk_index": args.chunk_index,
+        "chunk_product_count": len(read_product_urls_file(Path(args.product_urls_file))) if args.product_urls_file else 0,
+        "product_urls_file": args.product_urls_file,
         "product_limit": args.product_limit,
         "product_limit_per_category": args.product_limit_per_category,
         "variant_limit_per_product": args.variant_limit_per_product,
@@ -535,6 +631,7 @@ def run(args: argparse.Namespace) -> int:
             "HTTP_429, HTTP_5xx, TIMEOUT_CONNECT, TIMEOUT_READ, and RATE_LIMITED are retried per URL.",
             "HTTP_403 or captcha/challenge detection stops the run immediately.",
             "products_current.csv and the dated products snapshot have the Phase 2 enriched schema.",
+            "variant_limit_per_product=0 means all pending variant candidates for each product are fetched.",
         ],
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -547,6 +644,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="data")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--category-url", default="")
+    parser.add_argument("--category-name", default="")
+    parser.add_argument("--category-slug", default="")
+    parser.add_argument("--chunk-slug", default="")
+    parser.add_argument("--chunk-index", type=int, default=0)
+    parser.add_argument("--product-urls-file", default="")
     parser.add_argument("--product-limit", type=int, default=0)
     parser.add_argument("--product-limit-per-category", type=int, default=3)
     parser.add_argument("--variant-limit-per-product", type=int, default=1)

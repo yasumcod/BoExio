@@ -368,10 +368,15 @@ Phase 3 への導線:
 - Phase 6 workflow: `.github/workflows/boexio-weekly.yml`。
 - 手動実行は `workflow_dispatch`、定期実行は毎週日曜 15:00 JST 相当の `0 6 * * 0`。
 - 手動実行では `product_limit_per_category` を指定できる。既定は 3 件で、`product_limit=0` は全体上限なしを意味する。
+- 手動実行では `chunk_size` も指定できる。既定は 5 商品。`category_slug` / `chunk_slug` は失敗範囲の再実行用 input として使う。
+- `variant_limit_per_product=0` は商品ごとの全 pending variant candidate を取得する意味にする。
 - workflow permissions は `contents: write` のみ設定した。
-- Phase 3、Phase 4、Phase 5 を順に実行し、各 phase の終了コードと `run_metadata.json` の `run_status` を Phase 6 metadata に集約する。
+- workflow は `discover-categories`、`discover-products`、`scrape-product-chunk`、`merge-report` の 4 job 構成にした。
+- `scrape-product-chunk` は `strategy.fail-fast: false`、`max-parallel: 2` で実行し、チャンク job からは Release upload しない。
+- Phase 4、Phase 5 は `merge-report` で結合済み Phase 3 出力に対して実行し、各 phase の終了コードと `run_metadata.json` の `run_status` を Phase 6 metadata に集約する。
 - 前回 CSV は最新の過去 GitHub Release asset `phase3_products_current.csv` から取得する。初回など前回 CSV がない場合は Phase 2 schema の空 CSV を生成し、今回行を new item として扱う。
 - `artifacts/` に CSV、Excel、metadata、errors、workflow logs、tar.gz bundle、Release body を集約し、GitHub Actions artifact と GitHub Release assets の両方に保存する。
+- Release 本文と `phase6_metadata.json` には、欠落カテゴリ、欠落チャンク、失敗チャンクを出力する。
 - artifact retention は 30 日。
 - Release tag は `weekly-YYYY-MM-DD`、Release name は `BoExio Weekly Report YYYY-MM-DD`。
 - `BOEXIO_CONTACT_EMAIL` は任意 secret として env に渡す。未設定時は既存既定値で動く。
@@ -397,6 +402,7 @@ Phase 3 への導線:
 - [x] 価格履歴監査に必要な過去成果物の保存期間を決める。
 - [x] 複数カテゴリへ広げる判断基準を作る。
 - [x] 全商品カテゴリへ広げる前の受け入れ条件を決める。
+- [x] 全商品、全パターン取得に向けたカテゴリ分割と商品チャンク分割の設計資料を作る。
 - [x] 将来的な管理画面、API、見積書自動生成に必要な追加データを整理する。
 - [x] 営業向け標準カラム順をコード上に定義する。
 - [x] Phase 5 の `current_master` シートを Phase 7 標準カラム順に寄せる。
@@ -420,6 +426,11 @@ Phase 3 への導線:
 - 価格履歴監査は GitHub Releases を正本とし、初期保存期間は 3 年とする。
 - 複数カテゴリ拡張は、チェアカテゴリの週次 run が 2 回連続で成功または許容済み `partial_success` であることを前提にする。
 - 全商品カテゴリへ広げる前に、カテゴリ別 metadata、属性差異、Release asset サイズ、営業確認体制を受け入れ条件として確認する。
+- 全商品、全パターン取得は 1 job 逐次実行ではなく、`documents/category.md` のカテゴリ matrix と商品チャンク分割で実装する。
+- 取得 job は `max-parallel: 2` を初期値にし、チャンクが多数あっても同時実行は最大 2 job までに制限する。
+- Release 作成と asset upload はカテゴリ job やチャンク job では行わず、集約 job だけで実行する。
+- `category_slug` は既存カテゴリ mapping 優先、未知カテゴリは ASCII 化または `category-<sha1先頭10桁>` にする。
+- 必須カテゴリ欠落または期待チャンク欠落は `overall_run_status=failed`、生成済みチャンク内の取得失敗は `partial_success` とする。
 - Phase 7 標準カラム定義は `boexio/quote_columns.py` に追加した。
 - Phase 5 の `current_master` は、識別、商品、構成、価格、状態、参照、監査の順に固定した。
 - Phase 7 標準カラムに `category_name` / `category_url` を追加し、カテゴリ別の営業確認ができるようにした。

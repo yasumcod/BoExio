@@ -126,6 +126,7 @@ Excel の確認優先順:
 - `config/target_categories.csv` で対象カテゴリを管理し、`--product-limit-per-category 3` でカテゴリごとに 3 商品ずつ取得できる。
 - `variant_key`、`price_compare_value`、`currency`、`tax_type` の欠損が業務許容範囲内。
 - 構成属性がチェアと異なる場合、固定列で表現できるか key/value 拡張が必要かを判断する。
+- 全商品、全パターン取得へ進む前に、カテゴリ matrix と商品チャンク分割の設計を `documents/category.md` に固定する。
 
 ## 7. 全商品カテゴリへ広げる前の受け入れ条件
 
@@ -133,6 +134,8 @@ Excel の確認優先順:
 
 - カテゴリごとの実行上限、取得間隔、停止条件が設定できる。
 - カテゴリ別の成功率、失敗率、schema mismatch 件数を metadata で追える。
+- 重いカテゴリを商品チャンクに分割し、GitHub Actions の取得 job を `max-parallel: 2` で制御できる。
+- チャンク別 artifact を結合し、最終的な `phase3_products_current.csv` を 1 ファイルとして出力できる。
 - 営業がカテゴリ別に Excel を確認できる。
 - 構成属性がカテゴリごとに異なっても、見積確認に必要な最低限の列が欠けない。
 - Release asset のサイズと保存期間が運用可能な範囲に収まる。

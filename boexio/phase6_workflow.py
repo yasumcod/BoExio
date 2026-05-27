@@ -194,6 +194,7 @@ def stage(args: argparse.Namespace) -> int:
         Path(args.logs_dir),
         output_dir,
     )
+    phase3_metadata = read_json(Path(args.phase3_dir) / "run_metadata.json")
     status = overall_run_status(results, validation_exit_codes)
     now = datetime.now(timezone.utc).isoformat()
     errors: list[dict[str, str]] = []
@@ -234,6 +235,11 @@ def stage(args: argparse.Namespace) -> int:
             for result in results
         ],
         "overall_run_status": status,
+        "missing_categories": phase3_metadata.get("missing_categories", []),
+        "missing_chunks": phase3_metadata.get("missing_chunks", []),
+        "failed_chunks": phase3_metadata.get("failed_chunks", []),
+        "category_product_row_counts": phase3_metadata.get("category_product_row_counts", {}),
+        "chunk_product_row_counts": phase3_metadata.get("chunk_product_row_counts", {}),
         "output_files": sorted(set(copied)),
         "notes": [
             "Phase 6 retrieves phase3_products_current.csv from the latest previous GitHub Release when available.",
@@ -277,6 +283,13 @@ def release_body(metadata: dict) -> str:
         lines.append(
             f"- {result['phase']}: run_status=`{result['run_status']}`, exit_code=`{result['command_exit_code']}`"
         )
+    lines.extend(["", "## Missing / Failed Chunks"])
+    missing_categories = metadata.get("missing_categories", [])
+    missing_chunks = metadata.get("missing_chunks", [])
+    failed_chunks = metadata.get("failed_chunks", [])
+    lines.append(f"- missing_categories: `{', '.join(missing_categories) if missing_categories else 'none'}`")
+    lines.append(f"- missing_chunks: `{', '.join(missing_chunks) if missing_chunks else 'none'}`")
+    lines.append(f"- failed_chunks: `{', '.join(failed_chunks) if failed_chunks else 'none'}`")
     lines.extend(
         [
             "",

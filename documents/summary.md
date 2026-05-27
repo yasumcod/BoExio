@@ -1,7 +1,7 @@
 # BoExio 作業サマリー
 
 作成日: 2026-05-23
-更新日: 2026-05-26
+更新日: 2026-05-27
 
 ## 今日実装したところ
 
@@ -182,6 +182,21 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 - 見積前の元ページ確認導線は `source_url` とする。
 - 価格履歴監査は GitHub Releases を正本とし、初期保存期間は 3 年とする。
 - 複数カテゴリへ広げる判断基準と、全商品カテゴリへ広げる前の受け入れ条件を定義した。
+- 全商品、全パターン取得に向けたカテゴリ分割実行設計を `documents/category.md` に追加した。
+- 設計方針は、カテゴリ一覧から商品 URL を発見し、重いカテゴリは商品チャンク単位へ分割し、GitHub Actions matrix を `max-parallel: 2` で実行して最後に `phase3_products_current.csv` へ集約する。
+- カテゴリ/チャンク分割実行を実装した。
+  - `scripts/phase3_matrix.py` で enabled カテゴリ matrix と商品チャンク matrix を生成する。
+  - `category_slug` は既存カテゴリ mapping 優先、未知カテゴリは ASCII 化または `category-<sha1先頭10桁>` にする。
+  - チャンク初期値は 5 商品、`chunk_slug` は `<category_slug>-NNN`。
+  - `scripts/phase3_master.py` は `--product-urls-file` 指定時にカテゴリ discovery をスキップし、その URL だけを処理する。
+  - `variant_limit_per_product=0` は全 pending variant candidate の取得として扱う。
+  - `scripts/phase3_merge.py` でチャンク CSV と metadata を集約し、従来互換の `products_current.csv` を生成する。
+  - 重複 `variant_key` / `source_url` は最初の行を採用し、重複は `errors.csv` に残す。
+  - 必須カテゴリ欠落または期待チャンク欠落は `failed`、生成済みチャンク内の失敗は `partial_success` とする。
+- `.github/workflows/boexio-weekly.yml` は `discover-categories`、`discover-products`、`scrape-product-chunk`、`merge-report` の 4 job 構成になった。
+  - `scrape-product-chunk` は `strategy.fail-fast: false`、`max-parallel: 2`。
+  - Release 作成、編集、asset upload は `merge-report` のみで実行する。
+  - 再実行 input として `chunk_size`、`category_slug`、`chunk_slug` を追加した。
 - 将来的な管理画面、API、見積書自動生成に必要な追加データを整理した。
 - Phase 7 標準カラム定義を `boexio/quote_columns.py` に追加した。
 - Phase 5 の `current_master` シートを Phase 7 標準カラム順に更新した。
@@ -191,14 +206,15 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 
 ## 次にどこから始めるか
 
-次は全カテゴリ 3 商品ずつのスモーク run を実施し、カテゴリごとの属性差異と取得可否を確認する段階。
+次は全カテゴリ 3 商品ずつのスモーク run を実施し、カテゴリごとの属性差異と取得可否を確認する段階。その後、`documents/category.md` の設計に沿ってカテゴリ matrix、商品チャンク、集約 job の順に実装する。
 
 優先候補:
 
 1. `config/target_categories.csv` のカテゴリ URL が現行サイトで有効か確認し、全カテゴリ 3 商品ずつの Phase 3 smoke run を行う。
-2. Fixture または smoke run を使って Phase 5 レポートを再生成し、`current_master` のカテゴリ付き表示を営業確認する。
-3. カテゴリ固有属性を固定列で増やすか、`selected_attributes_json` のような key/value 形式にするかを判断する。
-4. URL リスト管理者、価格改定レポート確認責任者、正式連絡先を決める。
+2. `documents/category.md` に沿って、カテゴリ matrix と商品チャンクの GitHub Actions 設計を実装する。
+3. Fixture または smoke run を使って Phase 5 レポートを再生成し、`current_master` のカテゴリ付き表示を営業確認する。
+4. カテゴリ固有属性を固定列で増やすか、`selected_attributes_json` のような key/value 形式にするかを判断する。
+5. URL リスト管理者、価格改定レポート確認責任者、正式連絡先を決める。
 
 ## 残っている判断事項
 
@@ -213,6 +229,7 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 - Phase 4 の `removed_items` を次回 run の状態入力としてどう保存・引き継ぐか。
 - Excel レポートの確認責任者と確認期限。
 - GitHub Actions の通知先実体。
+- 全商品、全パターン取得時の `max-parallel` を 2 から増やす判断基準。
 - 正式な連絡先メールアドレス。
 - 見積に使う価格の社内丸め・割引・掛け率ルール。
 - カテゴリ固有属性を固定列で増やすか、key/value JSON で持つか。
