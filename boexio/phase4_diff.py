@@ -15,6 +15,7 @@ from boexio.phase2_variants import ERROR_COLUMNS, PHASE2_CSV_COLUMNS, write_erro
 PHASE4_PARSER_VERSION = "0.4.0"
 DIFF_SCHEMA_VERSION = "0.1.0"
 DISCONTINUED_AFTER_MISSING_STREAK = 4
+BACKWARD_COMPATIBLE_PHASE2_COLUMNS = {"category_name", "category_url"}
 
 PRICE_CHANGE_COLUMNS = [
     "run_id",
@@ -116,7 +117,10 @@ def ensure_schema_compatible(previous_metadata: dict, current_metadata: dict) ->
 def validate_columns(rows: list[dict[str, str]], path: Path) -> list[str]:
     if not rows:
         return []
-    missing = [column for column in PHASE2_CSV_COLUMNS if column not in rows[0]]
+    required_columns = [
+        column for column in PHASE2_CSV_COLUMNS if column not in BACKWARD_COMPATIBLE_PHASE2_COLUMNS
+    ]
+    missing = [column for column in required_columns if column not in rows[0]]
     return [f"{path}: missing column {column}" for column in missing]
 
 

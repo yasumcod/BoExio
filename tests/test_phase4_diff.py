@@ -1,7 +1,7 @@
 import unittest
 
 from boexio.phase2_variants import PHASE2_CSV_COLUMNS
-from boexio.phase4_diff import diff_rows, ensure_schema_compatible
+from boexio.phase4_diff import diff_rows, ensure_schema_compatible, validate_columns
 
 
 def row(variant_key: str, price: str = "1000", **overrides):
@@ -100,6 +100,13 @@ class Phase4DiffTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("schema_version mismatch", message)
+
+    def test_category_columns_are_backward_compatible(self):
+        legacy_row = row("a")
+        legacy_row.pop("category_name")
+        legacy_row.pop("category_url")
+
+        self.assertEqual([], validate_columns([legacy_row], "previous.csv"))
 
 
 if __name__ == "__main__":
