@@ -215,14 +215,33 @@ jobs:
         if: always()
         shell: bash
         run: |
+          retry_gh() {
+            local attempt=1
+            local max_attempts=5
+            local delay_seconds=5
+            local exit_code=0
+
+            until "$@"; do
+              exit_code="$?"
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Command failed after ${attempt} attempts: $*" >&2
+                return "$exit_code"
+              fi
+              echo "Command failed with exit code ${exit_code}; retrying in ${delay_seconds}s: $*" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+          }
+
           release_tag="${{ steps.vars.outputs.release_tag }}"
           release_name="${{ steps.vars.outputs.release_name }}"
           if gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release edit "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
+            retry_gh gh release edit "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
           else
-            gh release create "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
+            retry_gh gh release create "$release_tag" --title "$release_name" --notes-file artifacts/release_body.md
           fi
-          gh release upload "$release_tag" artifacts/* --clobber
+          retry_gh gh release upload "$release_tag" artifacts/* --clobber
 
       - name: Send notification
         if: always()
