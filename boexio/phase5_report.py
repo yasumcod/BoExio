@@ -10,6 +10,7 @@ from pathlib import Path
 from boexio.phase1_poc import commit_sha, relative_output_path, sha256_file
 from boexio.phase2_variants import ERROR_COLUMNS
 from boexio.phase4_diff import ADDED_COLUMNS, PRICE_CHANGE_COLUMNS, REMOVED_COLUMNS
+from boexio.quote_columns import QUOTE_MASTER_COLUMNS, quote_master_rows
 from boexio.xlsx_writer import Worksheet, write_xlsx
 
 
@@ -125,29 +126,21 @@ def summary_sheet_rows(summary: dict[str, int | str], diff_summary: dict) -> lis
 
 
 def current_master_columns(rows: list[dict[str, str]]) -> list[str]:
-    preferred = [
-        "run_id",
-        "source_url",
-        "source_checked_at",
-        "scrape_status",
-        "product_name",
-        "item_number",
-        "variant_key",
-        "sku",
-        "selected_size",
-        "selected_upholstery",
-        "selected_leg",
-        "price_compare_value",
-        "price_compare_from",
-        "currency",
-        "tax_type",
-        "list_price",
-        "display_price",
-        "canonical_price",
-    ]
-    if not rows:
-        return preferred
-    return [column for column in preferred if column in rows[0]]
+    return QUOTE_MASTER_COLUMNS
+
+
+def apply_current_master_metadata(rows: list[dict[str, str]], metadata: dict) -> list[dict[str, str]]:
+    parser_version = str(metadata.get("parser_version", ""))
+    schema_version = str(metadata.get("schema_version", ""))
+    enriched_rows: list[dict[str, str]] = []
+    for row in rows:
+        enriched = dict(row)
+        if parser_version and not enriched.get("parser_version"):
+            enriched["parser_version"] = parser_version
+        if schema_version and not enriched.get("schema_version"):
+            enriched["schema_version"] = schema_version
+        enriched_rows.append(enriched)
+    return enriched_rows
 
 
 def worksheet_widths(columns: list[str]) -> list[float]:
@@ -176,12 +169,13 @@ def build_worksheets(
     errors: list[dict[str, str]],
 ) -> list[Worksheet]:
     current_columns = current_master_columns(current_rows)
+    sales_current_rows = quote_master_rows(current_rows)
     return [
         Worksheet("summary", summary_sheet_rows(summary, diff_summary), [28, 72], freeze_top_row=True, auto_filter=False),
         Worksheet("price_changes", table_rows(PRICE_CHANGE_COLUMNS, price_changes), worksheet_widths(PRICE_CHANGE_COLUMNS)),
         Worksheet("added", table_rows(ADDED_COLUMNS, added), worksheet_widths(ADDED_COLUMNS)),
         Worksheet("removed", table_rows(REMOVED_COLUMNS, removed), worksheet_widths(REMOVED_COLUMNS)),
-        Worksheet("current_master", table_rows(current_columns, current_rows), worksheet_widths(current_columns)),
+        Worksheet("current_master", table_rows(current_columns, sales_current_rows), worksheet_widths(current_columns)),
         Worksheet("errors", table_rows(ERROR_COLUMNS, errors), worksheet_widths(ERROR_COLUMNS)),
     ]
 
@@ -221,6 +215,8 @@ def run(args: argparse.Namespace) -> int:
     removed = read_csv_rows(removed_path)
     errors = read_csv_rows(errors_path)
     current_rows = read_csv_rows(current_master_path)
+    current_metadata_path = current_master_path.parent / "run_metadata.json"
+    current_rows = apply_current_master_metadata(current_rows, read_json(current_metadata_path))
     diff_summary = read_json(diff_summary_path)
     summary = summary_from_inputs(diff_summary, current_rows, started_at.isoformat())
     discontinued_count = sum(1 for row in removed if row.get("current_state") == "discontinued")
@@ -248,6 +244,7 @@ def run(args: argparse.Namespace) -> int:
             "removed_csv": str(removed_path),
             "errors_csv": str(errors_path),
             "diff_summary": str(diff_summary_path),
+            "current_master_metadata": str(current_metadata_path) if current_metadata_path.exists() else "",
         },
         "summary": summary,
         "output_files": [relative_output_path(report_path), relative_output_path(metadata_path)],

@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       product_limit:
-        description: "Maximum products to process in Phase 3"
+        description: "Optional global maximum products to process in Phase 3; 0 means no global cap"
+        required: false
+        default: "0"
+      product_limit_per_category:
+        description: "Maximum products to process per category in Phase 3"
         required: false
         default: "3"
       variant_limit_per_product:
@@ -50,10 +54,12 @@ jobs:
           release_tag="weekly-${run_date}"
           release_name="BoExio Weekly Report ${run_date}"
           product_limit="${{ github.event.inputs.product_limit }}"
+          product_limit_per_category="${{ github.event.inputs.product_limit_per_category }}"
           variant_limit_per_product="${{ github.event.inputs.variant_limit_per_product }}"
           request_interval="${{ github.event.inputs.request_interval }}"
           retries="${{ github.event.inputs.retries }}"
-          if [ -z "$product_limit" ]; then product_limit="3"; fi
+          if [ -z "$product_limit" ]; then product_limit="0"; fi
+          if [ -z "$product_limit_per_category" ]; then product_limit_per_category="3"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="1"; fi
           if [ -z "$request_interval" ]; then request_interval="5"; fi
           if [ -z "$retries" ]; then retries="2"; fi
@@ -66,6 +72,7 @@ jobs:
             echo "release_tag=$release_tag"
             echo "release_name=$release_name"
             echo "product_limit=$product_limit"
+            echo "product_limit_per_category=$product_limit_per_category"
             echo "variant_limit_per_product=$variant_limit_per_product"
             echo "request_interval=$request_interval"
             echo "retries=$retries"
@@ -127,6 +134,7 @@ jobs:
           python3 scripts/phase3_master.py \
             --run-id "${{ steps.vars.outputs.phase3_run_id }}" \
             --product-limit "${{ steps.vars.outputs.product_limit }}" \
+            --product-limit-per-category "${{ steps.vars.outputs.product_limit_per_category }}" \
             --variant-limit-per-product "${{ steps.vars.outputs.variant_limit_per_product }}" \
             --request-interval "${{ steps.vars.outputs.request_interval }}" \
             --retries "${{ steps.vars.outputs.retries }}" 2>&1 | tee logs/phase3.log

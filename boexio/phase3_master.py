@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 
 from boexio.phase1_poc import (
     PARSER_VERSION,
@@ -50,6 +50,12 @@ ABSOLUTE_FAILURE_COUNT = 5
 MAX_SCHEMA_MISMATCH_COUNT = 3
 
 
+@dataclass(frozen=True)
+class CategoryTarget:
+    name: str
+    url: str
+
+
 @dataclass
 class RateLimiter:
     interval_seconds: float
@@ -69,6 +75,39 @@ class RateLimiter:
 
 class StopRunError(RuntimeError):
     pass
+
+
+def infer_category_name(url: str) -> str:
+    tail = urlparse(url).path.rstrip("/").split("/")[-1]
+    return unquote(tail) if tail else url
+
+
+def normalize_category_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = quote(unquote(parsed.path), safe="/")
+    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
+
+
+def read_target_categories(path: Path) -> list[CategoryTarget]:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".csv":
+        rows = csv.DictReader(text.splitlines())
+        targets: list[CategoryTarget] = []
+        for row in rows:
+            enabled = row.get("enabled", "true").strip().lower()
+            if enabled in {"0", "false", "no", "n"}:
+                continue
+            url = normalize_category_url(row.get("category_url", "").strip())
+            if not url:
+                continue
+            name = row.get("category_name", "").strip() or infer_category_name(url)
+            targets.append(CategoryTarget(name=name, url=url))
+        return targets
+
+    return [
+        CategoryTarget(name=infer_category_name(url), url=normalize_category_url(url))
+        for url in read_target_urls(path)
+    ]
 
 
 def collect_product_urls(category_url: str, html: str) -> list[str]:
@@ -175,8 +214,15 @@ def candidate_fallback(product_url: str) -> VariantCandidate:
     )
 
 
+def add_category_metadata(row: dict[str, str], category: CategoryTarget) -> dict[str, str]:
+    enriched = dict(row)
+    enriched["category_name"] = category.name
+    enriched["category_url"] = category.url
+    return enriched
+
+
 def write_discovered_urls_csv(path: Path, run_id: str, rows: list[dict[str, str]]) -> None:
-    columns = ["run_id", "category_url", "product_url", "discovery_status", "discovery_error"]
+    columns = ["run_id", "category_name", "category_url", "product_url", "discovery_status", "discovery_error"]
     with path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)
         writer.writeheader()
@@ -226,6 +272,28 @@ def determine_run_status(
     return "failed", ["no successful rows"], failure_rate
 
 
+def select_products_by_category(
+    category_products: dict[str, list[str]],
+    limit_per_category: int,
+    global_limit: int,
+) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for category_url, product_urls in category_products.items():
+        selected_for_category = 0
+        for product_url in product_urls:
+            if product_url in seen:
+                continue
+            selected.append(product_url)
+            seen.add(product_url)
+            selected_for_category += 1
+            if global_limit > 0 and len(selected) >= global_limit:
+                return selected
+            if limit_per_category > 0 and selected_for_category >= limit_per_category:
+                break
+    return selected
+
+
 def run(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc)
     run_id = args.run_id or started_at.strftime("%Y%m%dT%H%M%SZ")
@@ -234,7 +302,7 @@ def run(args: argparse.Namespace) -> int:
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     limiter = RateLimiter(interval_seconds=args.request_interval)
-    target_urls = read_target_urls(Path(args.targets))
+    target_categories = read_target_categories(Path(args.targets))
     logs: list[str] = []
     rows: list[dict[str, str]] = []
     candidates: list[VariantCandidate] = []
@@ -245,15 +313,18 @@ def run(args: argparse.Namespace) -> int:
     stop_reason = ""
 
     try:
-        discovered_product_urls: list[str] = []
+        category_products_by_url: dict[str, list[str]] = {}
+        product_category_by_url: dict[str, CategoryTarget] = {}
         seen_products: set[str] = set()
-        for category_index, target_url in enumerate(target_urls, start=1):
+        for category_index, target in enumerate(target_categories, start=1):
+            target_url = target.url
             valid, error_code = validate_input_url(target_url)
             if not valid:
-                rows.append(failed_row(run_id, target_url, error_code, "input URL is not allowed"))
+                rows.append(add_category_metadata(failed_row(run_id, target_url, error_code, "input URL is not allowed"), target))
                 discovered_rows.append(
                     {
                         "run_id": run_id,
+                        "category_name": target.name,
                         "category_url": target_url,
                         "product_url": "",
                         "discovery_status": "failed",
@@ -267,30 +338,33 @@ def run(args: argparse.Namespace) -> int:
                 (raw_dir / raw_name).write_text(category.html, encoding="utf-8")
                 category_pagination_summaries[target_url] = category_pagination_summary(category.html)
                 category_products = collect_product_urls(target_url, category.html)
-                logs.append(f"category_url={target_url} product_url_count={len(category_products)}")
+                category_products_by_url[target_url] = []
+                logs.append(f"category_name={target.name} category_url={target_url} product_url_count={len(category_products)}")
                 for product_url in category_products:
-                    if product_url in seen_products:
-                        continue
-                    seen_products.add(product_url)
-                    discovered_product_urls.append(product_url)
+                    category_products_by_url[target_url].append(product_url)
+                    if product_url not in product_category_by_url:
+                        product_category_by_url[product_url] = target
                     discovered_rows.append(
                         {
                             "run_id": run_id,
+                            "category_name": target.name,
                             "category_url": target_url,
                             "product_url": product_url,
-                            "discovery_status": "success",
-                            "discovery_error": "",
+                            "discovery_status": "duplicate" if product_url in seen_products else "success",
+                            "discovery_error": "duplicate_product_url" if product_url in seen_products else "",
                         }
                     )
+                    seen_products.add(product_url)
             except StopRunError as exc:
                 stop_reason = str(exc)
                 raise
             except Exception as exc:
                 code, detail = split_error(exc)
-                rows.append(failed_row(run_id, target_url, code, detail))
+                rows.append(add_category_metadata(failed_row(run_id, target_url, code, detail), target))
                 discovered_rows.append(
                     {
                         "run_id": run_id,
+                        "category_name": target.name,
                         "category_url": target_url,
                         "product_url": "",
                         "discovery_status": "failed",
@@ -299,14 +373,21 @@ def run(args: argparse.Namespace) -> int:
                 )
                 logs.append(f"failed_category_url={target_url} code={code} detail={detail}")
 
-        selected_product_urls = discovered_product_urls[: args.product_limit]
-        logs.append(f"discovered_product_url_count={len(discovered_product_urls)}")
+        selected_product_urls = select_products_by_category(
+            category_products_by_url,
+            args.product_limit_per_category,
+            args.product_limit,
+        )
+        discovered_product_url_count = len(product_category_by_url)
+        logs.append(f"discovered_product_url_count={discovered_product_url_count}")
         logs.append(f"product_limit={args.product_limit}")
+        logs.append(f"product_limit_per_category={args.product_limit_per_category}")
         logs.append(f"variant_limit_per_product={args.variant_limit_per_product}")
         logs.append(f"request_interval={args.request_interval}")
         logs.append(f"retries={args.retries}")
 
         for product_index, product_url in enumerate(selected_product_urls, start=1):
+            product_category = product_category_by_url[product_url]
             try:
                 product_page = fetch_with_control(product_url, args.timeout, args.retries, limiter)
                 raw_name = safe_raw_name("product", product_index, product_url)
@@ -344,20 +425,20 @@ def run(args: argparse.Namespace) -> int:
                         )
                         raw_path = raw_dir / raw_name
                         raw_path.write_text(variant_page.html, encoding="utf-8")
-                        rows.append(parse_product(variant_page, f"raw/{raw_name}", run_id))
+                        rows.append(add_category_metadata(parse_product(variant_page, f"raw/{raw_name}", run_id), product_category))
                         logs.append(f"fetched_variant_url={candidate.variant_url}")
                     except StopRunError:
                         raise
                     except Exception as exc:
                         code, detail = split_error(exc)
-                        rows.append(failed_row(run_id, candidate.variant_url, code, detail))
+                        rows.append(add_category_metadata(failed_row(run_id, candidate.variant_url, code, detail), product_category))
                         logs.append(f"failed_variant_url={candidate.variant_url} code={code} detail={detail}")
             except StopRunError as exc:
                 stop_reason = str(exc)
                 raise
             except Exception as exc:
                 code, detail = split_error(exc)
-                rows.append(failed_row(run_id, product_url, code, detail))
+                rows.append(add_category_metadata(failed_row(run_id, product_url, code, detail), product_category))
                 logs.append(f"failed_product_url={product_url} code={code} detail={detail}")
     except StopRunError as exc:
         stop_reason = str(exc)
@@ -385,6 +466,13 @@ def run(args: argparse.Namespace) -> int:
     failure_count = sum(1 for row in rows if row["scrape_status"] == "failed")
     scrape_error_code_counts = error_code_counts(enriched_rows)
     schema_mismatch_count = scrape_error_code_counts.get("SCHEMA_MISMATCH", 0)
+    discovered_counts_by_category = {
+        target.url: len(category_products_by_url.get(target.url, [])) for target in target_categories
+    }
+    selected_counts_by_category: dict[str, int] = {}
+    for product_url in selected_product_urls:
+        category = product_category_by_url[product_url]
+        selected_counts_by_category[category.url] = selected_counts_by_category.get(category.url, 0) + 1
     run_status, run_status_reasons, failure_rate = determine_run_status(
         success_count,
         failure_count,
@@ -410,15 +498,20 @@ def run(args: argparse.Namespace) -> int:
         "run_id": run_id,
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
-        "target_urls": target_urls,
+        "target_urls": [target.url for target in target_categories],
+        "target_categories": [
+            {"category_name": target.name, "category_url": target.url} for target in target_categories
+        ],
         "product_limit": args.product_limit,
+        "product_limit_per_category": args.product_limit_per_category,
         "variant_limit_per_product": args.variant_limit_per_product,
         "request_interval": args.request_interval,
         "timeout": args.timeout,
         "retries": args.retries,
-        "discovered_product_url_count": sum(
-            1 for row in discovered_rows if row["discovery_status"] == "success"
-        ),
+        "discovered_product_url_count": discovered_product_url_count,
+        "discovered_product_counts_by_category": discovered_counts_by_category,
+        "selected_product_count": len(selected_product_urls),
+        "selected_product_counts_by_category": selected_counts_by_category,
         "processed_product_count": len(product_candidate_counts),
         "product_candidate_counts": product_candidate_counts,
         "product_attribute_summaries": product_attribute_summaries,
@@ -450,11 +543,12 @@ def run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BoExio Phase 3 product master generation.")
-    parser.add_argument("--targets", default="config/target_urls.txt")
+    parser.add_argument("--targets", default="config/target_categories.csv")
     parser.add_argument("--output-dir", default="data")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--product-limit", type=int, default=3)
+    parser.add_argument("--product-limit", type=int, default=0)
+    parser.add_argument("--product-limit-per-category", type=int, default=3)
     parser.add_argument("--variant-limit-per-product", type=int, default=1)
     parser.add_argument("--request-interval", type=float, default=5.0)
     parser.add_argument("--retries", type=int, default=2)

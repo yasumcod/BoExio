@@ -33,6 +33,8 @@ from boexio.phase1_poc import (
 PHASE2_PARSER_VERSION = "0.2.1"
 PHASE2_CSV_COLUMNS = [
     *CSV_COLUMNS,
+    "category_name",
+    "category_url",
     "variant_key",
     "variant_key_from",
     "variant_key_error_type",

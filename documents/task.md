@@ -195,10 +195,14 @@ Phase 3 への導線:
 
 - Phase 3 実装ファイル: `boexio/phase3_master.py`、`scripts/phase3_master.py`。
 - カテゴリ HTML から `/ja-jp/p/` 商品 URL を重複なしで収集し、`discovered_product_urls.csv` に出力する。
+- カテゴリ入力は `config/target_categories.csv` を既定にし、`category_name`、`category_url`、`enabled` を持つ。
+- 有効カテゴリはすべて巡回し、既定では `--product-limit-per-category 3` でカテゴリごとに 3 商品ずつ取得する。`--product-limit 0` は全体上限なし、正の値は緊急停止用の全体上限として使う。
+- `products_current.csv` と日付付き snapshot には `category_name` / `category_url` を追加する。
+- `discovered_product_urls.csv` にはカテゴリ名、カテゴリ URL、商品 URL、重複状態を出力する。
 - 最小検証ではチェアカテゴリから 23 商品 URL を発見した。
 - 商品ごとに Phase 2 の `extract_candidates()` を適用し、候補数を `run_metadata.json` の `product_candidate_counts` に保存する。
 - Catskills 1 商品では 152 構成候補を `variant_candidates.csv` に出力できた。
-- 実取得件数は `--product-limit` と `--variant-limit-per-product` で制御する。
+- 実取得件数は `--product-limit-per-category`、`--product-limit`、`--variant-limit-per-product` で制御する。
 - `products_current.csv` と `products_YYYY-MM-DD_<run_id>.csv` を同一内容で保存する。
 - 取得制御は同時接続数 1、`--request-interval` 既定 5 秒、`--timeout`、`--retries` で実装した。
 - 再試行対象は `HTTP_429`、`HTTP_5xx`、`TIMEOUT_CONNECT`、`TIMEOUT_READ`、`RATE_LIMITED`。
@@ -208,6 +212,7 @@ Phase 3 への導線:
 - 検証コマンド: `python3 -m py_compile boexio/phase1_poc.py boexio/phase2_variants.py boexio/phase3_master.py scripts/phase1_poc.py scripts/phase2_variants.py scripts/phase3_master.py`、`python3 scripts/phase3_master.py --run-id phase3-smoke-check-success --product-limit 1 --variant-limit-per-product 1 --request-interval 0 --retries 0`。
 - 失敗率、`SCHEMA_MISMATCH` 件数、停止理由を含む run 全体の失敗判定を `boexio/phase3_master.py` に実装した。
 - `run_metadata.json` に `scrape_error_code_counts`、`failure_rate`、`schema_mismatch_count`、`run_status_reasons` を保存する。
+- `run_metadata.json` に `target_categories`、`product_limit_per_category`、カテゴリ別の発見件数、選択件数を保存する。
 - Phase 3 検証資料: `documents/phase3_master_findings_ja.md`。
 - Catskills 152 構成全件検証 run: `data/runs/phase3-catskills-all-variants/`。
 - 152 構成は全件 `scrape_status=success`、SKU 欠損 0、`variant_key` 欠損 0、`price_compare_value` 欠損 0、errors 0。
@@ -344,10 +349,10 @@ Phase 3 への導線:
 - [x] Release name を `BoExio Weekly Report YYYY-MM-DD` 形式にする。
 - [x] failed run の Release 本文または名前で失敗が分かるようにする。
 - [x] 通知先 secret が設定されている場合だけ通知を送る処理を入れる。
-- [ ] 停止後の再開手順を運用メモにまとめる。
-- [ ] 監視通知先を決める。現時点では空欄のまま、機能のみ実装する。
-- [ ] robots.txt と利用規約の確認頻度を決める。
-- [ ] 障害時の復旧目標と運用記録の保存期間を決める。
+- [x] 停止後の再開手順を運用メモにまとめる。
+- [x] 監視通知先を決める。初期は GitHub Actions 失敗通知、任意 webhook は `BOEXIO_NOTIFY_WEBHOOK_URL`。
+- [x] robots.txt と利用規約の確認頻度を決める。通常時は月 1 回、停止・対象追加・取得範囲拡大時は都度確認。
+- [x] 障害時の復旧目標と運用記録の保存期間を決める。
 
 完了条件:
 
@@ -362,6 +367,7 @@ Phase 3 への導線:
 
 - Phase 6 workflow: `.github/workflows/boexio-weekly.yml`。
 - 手動実行は `workflow_dispatch`、定期実行は毎週日曜 15:00 JST 相当の `0 6 * * 0`。
+- 手動実行では `product_limit_per_category` を指定できる。既定は 3 件で、`product_limit=0` は全体上限なしを意味する。
 - workflow permissions は `contents: write` のみ設定した。
 - Phase 3、Phase 4、Phase 5 を順に実行し、各 phase の終了コードと `run_metadata.json` の `run_status` を Phase 6 metadata に集約する。
 - 前回 CSV は最新の過去 GitHub Release asset `phase3_products_current.csv` から取得する。初回など前回 CSV がない場合は Phase 2 schema の空 CSV を生成し、今回行を new item として扱う。
@@ -370,8 +376,11 @@ Phase 3 への導線:
 - Release tag は `weekly-YYYY-MM-DD`、Release name は `BoExio Weekly Report YYYY-MM-DD`。
 - `BOEXIO_CONTACT_EMAIL` は任意 secret として env に渡す。未設定時は既存既定値で動く。
 - 通知 secret は `BOEXIO_NOTIFY_WEBHOOK_URL`。未設定時は skip し、設定済みでも通知 step は `continue-on-error` とする。
-- TODO: GitHub Releases の長期保存期間と削除運用を決める。
-- TODO: 正式な通知先、正式な `BOEXIO_CONTACT_EMAIL`、障害時の復旧目標を決める。
+- TODO: 正式な webhook 通知先と正式な `BOEXIO_CONTACT_EMAIL` を決める。
+- Phase 6 運用メモ: `documents/operations_runbook_ja.md`。
+- 初期監視通知は GitHub Actions 失敗通知を使い、任意 webhook は `BOEXIO_NOTIFY_WEBHOOK_URL` に接続する。
+- robots.txt と利用規約は通常時に月 1 回、停止・対象追加・取得範囲拡大時に都度確認する。
+- 初期保存期間は GitHub Actions artifact 30 日、GitHub Releases 3 年、運用判断記録 3 年。
 
 ### Phase 7: 見積運用連携
 
@@ -382,31 +391,57 @@ Phase 3 への導線:
 
 タスク:
 
-- [ ] 見積に必要なカラムを営業確認の観点で棚卸しする。
-- [ ] 営業が参照する標準ファイルを定義する。
-- [ ] 商品 URL から元ページを確認できる導線を残す。
-- [ ] 価格履歴監査に必要な過去成果物の保存期間を決める。
-- [ ] 複数カテゴリへ広げる判断基準を作る。
-- [ ] 全商品カテゴリへ広げる前の受け入れ条件を決める。
-- [ ] 将来的な管理画面、API、見積書自動生成に必要な追加データを整理する。
+- [x] 見積に必要なカラムを営業確認の観点で棚卸しする。
+- [x] 営業が参照する標準ファイルを定義する。
+- [x] 商品 URL から元ページを確認できる導線を残す。
+- [x] 価格履歴監査に必要な過去成果物の保存期間を決める。
+- [x] 複数カテゴリへ広げる判断基準を作る。
+- [x] 全商品カテゴリへ広げる前の受け入れ条件を決める。
+- [x] 将来的な管理画面、API、見積書自動生成に必要な追加データを整理する。
+- [x] 営業向け標準カラム順をコード上に定義する。
+- [x] Phase 5 の `current_master` シートを Phase 7 標準カラム順に寄せる。
+- [x] 既存データにない状態管理列と監査列は空欄で出力できるようにする。
+- [x] `source_url` を標準確認導線として `current_master` に残す。
+- [x] `source_url` が空の行を見積確定前の手動確認対象として分かるようにする。
 
 完了条件:
 
-- [ ] 商品マスタが見積運用の標準データとして使える。
-- [ ] 過去価格の履歴を監査できる。
-- [ ] 新商品と販売終了候補の確認が定常業務として回る。
+- [x] 商品マスタが見積運用の標準データとして使える。
+- [x] 過去価格の履歴を監査できる。
+- [x] 新商品と販売終了候補の確認が定常業務として回る。
+- [x] `current_master` シートが Phase 7 の標準カラム順で出力される。
+- [x] `source_url`、価格監査列、run 追跡列が `current_master` から欠落しない。
+
+実施メモ:
+
+- Phase 7 設計資料: `documents/phase7_quote_integration_ja.md`。
+- 営業が参照する標準ファイルは `phase5_weekly_report.xlsx`、`phase3_products_current.csv`、`phase6_metadata.json` とする。
+- 見積前の元ページ確認導線は `source_url` とする。robots 除外対象の PDF 取得は標準導線にしない。
+- 価格履歴監査は GitHub Releases を正本とし、初期保存期間は 3 年とする。
+- 複数カテゴリ拡張は、チェアカテゴリの週次 run が 2 回連続で成功または許容済み `partial_success` であることを前提にする。
+- 全商品カテゴリへ広げる前に、カテゴリ別 metadata、属性差異、Release asset サイズ、営業確認体制を受け入れ条件として確認する。
+- Phase 7 標準カラム定義は `boexio/quote_columns.py` に追加した。
+- Phase 5 の `current_master` は、識別、商品、構成、価格、状態、参照、監査の順に固定した。
+- Phase 7 標準カラムに `category_name` / `category_url` を追加し、カテゴリ別の営業確認ができるようにした。
+- `current_state`、`missing_streak` など、既存 `products_current.csv` にない状態列は空欄で出力する。
+- `parser_version`、`schema_version` は Phase 3 の `run_metadata.json` が同じディレクトリにある場合は補完し、metadata がない場合も空欄で壊れないようにした。
+- `source_url` が空の行は `source_url_review_required=yes` として、見積確定前の手動確認対象にする。
+- robots 除外対象になり得る `pdf_url` は Phase 7 の標準確認導線には含めず、`source_url` を標準導線とする。
+- 標準マスタ CSV は今回は追加しない。Phase 7 設計で営業参照ファイルを `phase5_weekly_report.xlsx`、`phase3_products_current.csv`、`phase6_metadata.json` の 3 種類に固定しており、まずは既存成果物の列順整備を優先するため。
+- Phase 7 の追加テストは `tests/test_phase5_report.py` に入れた。`current_master` の列順、存在しない標準列の空欄出力、`source_url`、価格監査列、run 追跡列の欠落防止、空 `source_url` の手動確認フラグを確認する。
+- 検証コマンド: `python3 -m unittest tests/test_phase5_report.py tests/test_phase6_workflow.py`、`python3 -m unittest discover -s tests`。
 
 ### 横断タスク: テストと品質ゲート
 
-- [ ] 比較キー生成ロジックの単体テストを追加する。
-- [ ] 属性正規化ロジックの単体テストを追加する。
+- [x] 比較キー生成ロジックの単体テストを追加する。
+- [x] 属性正規化ロジックの単体テストを追加する。
 - [x] 価格差分判定ロジックの単体テストを追加する。
 - [x] added / removed / price_changes の判定テストを追加する。
 - [x] `missing_candidate`、`discontinued`、`revived` の状態遷移テストを追加する。
 - [x] errors シートの必須列欠損時にレポート生成が失敗扱いになることをテストする。
 - [x] `schema_version` 不一致時の挙動をテストする。
-- [ ] 実取得なしで再現できる fixture HTML / CSV を整備する。
-- [ ] ネットワーク取得を伴う検証は、通常テストと分離して手動または CI の限定ジョブにする。
+- [x] 実取得なしで再現できる fixture HTML / CSV を整備する。Phase 2 の最小 HTML fixture と CSV fixture を追加済み。
+- [x] ネットワーク取得を伴う検証は、通常テストと分離して手動または CI の限定ジョブにする。
 
 ### 横断タスク: 未確定事項の決定
 
@@ -419,15 +454,15 @@ Phase 3 への導線:
 - [ ] 削除候補の連続 4 回未検知ルールを変更する例外条件を決める。
 - [ ] run metadata の保存先と保存期間を決める。
 - [x] 定期実行の基準時刻とタイムゾーンを決める。毎週日曜 15:00 JST。
-- [ ] 停止後の再開手順を決める。
-- [ ] 監視通知先を決める。Phase 6 では通知機能のみ実装し、通知先は後で設定する。
-- [ ] robots.txt と利用規約の確認頻度を決める。
+- [x] 停止後の再開手順を決める。
+- [x] 監視通知先を決める。初期は GitHub Actions 失敗通知、任意 webhook は `BOEXIO_NOTIFY_WEBHOOK_URL`。
+- [x] robots.txt と利用規約の確認頻度を決める。
 - [ ] User-Agent の正式表記を決める。Phase 6 では env / secret で差し替え可能にする。
 - [ ] 連絡先メールアドレスを決める。Phase 6 では `BOEXIO_CONTACT_EMAIL` を任意設定にする。
 - [ ] 問い合わせ受領時のエスカレーション手順を決める。
 - [ ] 差分検知の許容誤差を決める。
-- [ ] 障害時の復旧目標を決める。
-- [ ] 運用記録の保存期間を決める。
+- [x] 障害時の復旧目標を決める。
+- [x] 運用記録の保存期間を決める。
 
 ## 実行ルール
 

@@ -1,6 +1,7 @@
 # BoExio 作業サマリー
 
 作成日: 2026-05-23
+更新日: 2026-05-26
 
 ## 今日実装したところ
 
@@ -127,6 +128,8 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 - Phase 1 仕上げは、社内決定が必要な URL 管理者・承認者以外は完了。
 - Phase 2 は、Catskills 1 商品について候補抽出、複数構成取得、比較キー生成、価格数値化、errors 出力準備まで完了。
 - Phase 3 は、カテゴリから複数商品 URL を収集し、商品ごとの構成候補抽出、取得制御、`products_current.csv` と日付付き snapshot 出力、run 全体の失敗判定まで実装済み。
+- Phase 3 は `config/target_categories.csv` の有効カテゴリをすべて巡回し、既定でカテゴリごとに 3 商品ずつ取得する段階へ移行した。全体上限は `--product-limit`、カテゴリ別上限は `--product-limit-per-category` で制御する。
+- `products_current.csv`、日付付き snapshot、Phase 5 の `current_master` には `category_name` / `category_url` を出力する。
 - 検証 run `data/runs/phase3-smoke-check-success/` では、チェアカテゴリから 23 商品 URL、Catskills 1 商品から 152 構成候補を抽出し、1 構成を `products_current.csv` に出力できた。
 - 検証 run `data/runs/phase3-catskills-all-variants/` では、Catskills 152 構成を 5 秒間隔・単一接続で全件取得し、152 行すべて成功した。SKU、variant_key、price_compare_value の欠損は 0。
 - 検証 run `data/runs/phase3-multi-product-attribute-check-v2/` では、6 商品の候補抽出を確認した。Hamilton は `vaMaterialUpholstery` ではなく `vaMaterialSeat` を使うため、fallback を実装して 6 候補へ展開できるようにした。
@@ -144,63 +147,58 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 - Excel には `summary`、`price_changes`、`added`、`removed`、`current_master`、`errors` の 6 シートが含まれる。
 - `tests/test_phase5_report.py` を追加し、summary 集計、必須 6 シート、errors 必須列欠損時の失敗を単体テストで確認した。
 - Phase 5 検証資料は `documents/phase5_report_findings_ja.md` に整理した。
+- Phase 7 実装として `boexio/quote_columns.py` を追加し、営業向け標準カラム順をコード上に固定した。
+- Phase 5 の `current_master` シートは、識別、商品、構成、価格、状態、参照、監査の順に出力するよう更新した。
+- `current_state`、`missing_streak` など既存 CSV にない状態列は空欄で出力する。
+- `parser_version`、`schema_version` は Phase 3 の `run_metadata.json` から Phase 5 Excel 側へ補完し、metadata がない場合も空欄で壊れないようにした。
+- `source_url` は標準確認導線として残し、空の場合は `source_url_review_required=yes` で見積確定前の手動確認対象にする。
+- Phase 7 標準カラムに `category_name` / `category_url` を追加し、営業確認時にカテゴリ別で商品を見られるようにした。
 
-## 明日どこから始めるか
+### Phase 6 定期実行
 
-次は Phase 6: GitHub Actions 定期実行。
+- Phase 6 は実装済み。
+- workflow は `.github/workflows/boexio-weekly.yml`。
+- `workflow_dispatch` と毎週日曜 15:00 JST 相当の cron `0 6 * * 0` で起動できる。
+- `workflow_dispatch` は `product_limit_per_category` でカテゴリごとの取得商品数を指定できる。既定は 3 件、`product_limit=0` は全体上限なし。
+- Phase 3、Phase 4、Phase 5 を順に実行し、成果物を `artifacts/` に集約する。
+- GitHub Actions artifact は 30 日保持、GitHub Releases は初期 3 年保存とする。
+- `BOEXIO_CONTACT_EMAIL` と `BOEXIO_NOTIFY_WEBHOOK_URL` は任意 secret として扱い、未設定でも workflow は失敗しない。
+- `tests/test_phase6_workflow.py` を追加し、Release 名、前回 CSV 初期化、成果物 staging、UTF-8 BOM 出力を確認した。
 
-Phase 6 の決定事項:
+### 運用メモと品質ゲート
 
-- 定期実行は毎週日曜 15:00 JST とする。
-  - GitHub Actions の cron は UTC 指定のため `0 6 * * 0` を使う。
-- 成果物は GitHub Actions artifact にも保存し、最終的には GitHub Releases にも保存する。
-- artifact は一時確認用として 30 日保持を推奨する。
-- GitHub Releases は監査・過去参照用として長期保存する。
-- Release tag は `weekly-YYYY-MM-DD`、Release name は `BoExio Weekly Report YYYY-MM-DD` を基本形にする。
-- `run_status=failed` の場合も、生成済み成果物、metadata、errors、ログを保存する。
-- GitHub Releases 作成に必要な workflow permissions は `contents: write` とする。
-- 通知機能は実装するが、通知先は未設定でも動くようにする。通知先 secret は後で設定する。
-- `BOEXIO_CONTACT_EMAIL` は secret / env で渡せる形にするが、正式な連絡先は後で設定する。
+- Phase 6 運用メモ `documents/operations_runbook_ja.md` を追加した。
+- 停止後の再開手順、初期監視通知、robots.txt / 利用規約の確認頻度、障害時復旧目標、保存期間を定義した。
+- `documents/compliance_checklist.md` に robots.txt と利用規約の定期確認頻度を追記した。
+- `tests/test_phase2_variants.py` を追加し、比較キー生成、属性正規化、Phase 2 CSV fixture、HTML fixture からの parser 回帰を確認した。
+- fixture は `tests/fixtures/phase2_products_fixture.csv` と `tests/fixtures/phase2_product_fixture.html`。
+- 通常テストはネットワーク取得を伴わずに実行できる。
 
-最初にやること:
+### Phase 7 見積運用連携
 
-1. `workflow_dispatch` で Phase 3、Phase 4、Phase 5 を順に実行する workflow を作る。
-2. 週次 `cron` を `0 6 * * 0` に設定する。
-3. 成果物 CSV、Excel、metadata、ログ、errors を artifact と GitHub Releases に保存する。
-4. `BOEXIO_CONTACT_EMAIL` と通知先 secret を未設定でも動く任意 env として扱う。
-5. `run_status=failed` でも成果物保存まで到達するように workflow を組む。
+- Phase 7 設計資料 `documents/phase7_quote_integration_ja.md` を追加した。
+- 営業確認に必要な標準カラムを棚卸しした。
+- 営業が参照する標準ファイルは `phase5_weekly_report.xlsx`、`phase3_products_current.csv`、`phase6_metadata.json` とした。
+- 見積前の元ページ確認導線は `source_url` とする。
+- 価格履歴監査は GitHub Releases を正本とし、初期保存期間は 3 年とする。
+- 複数カテゴリへ広げる判断基準と、全商品カテゴリへ広げる前の受け入れ条件を定義した。
+- 将来的な管理画面、API、見積書自動生成に必要な追加データを整理した。
+- Phase 7 標準カラム定義を `boexio/quote_columns.py` に追加した。
+- Phase 5 の `current_master` シートを Phase 7 標準カラム順に更新した。
+- Phase 5 の `current_master` シートに `category_name` / `category_url` を追加した。
+- 標準マスタ CSV は今回は追加せず、既存標準ファイル 3 種類のうち `phase5_weekly_report.xlsx` の `current_master` を営業向け標準順に整える方針にした。
+- 追加テストで、標準列順、空欄列、`source_url`、価格監査列、run 追跡列、空 `source_url` の手動確認フラグを確認した。
 
-Phase 3 で再利用するもの:
+## 次にどこから始めるか
 
-- `boexio.phase1_poc.read_target_urls`
-- `boexio.phase1_poc.parse_product`
-- `boexio.phase2_variants.extract_candidates`
-- `boexio.phase2_variants.enrich_rows`
-- `boexio.phase2_variants.error_rows`
-- `boexio.phase3_master.collect_product_urls`
-- `boexio.phase3_master.fetch_with_control`
-- `boexio.phase3_master.determine_run_status`
-- `boexio.phase4_diff.diff_rows`
-- `boexio.phase4_diff.PRICE_CHANGE_COLUMNS`
-- `boexio.phase4_diff.ADDED_COLUMNS`
-- `boexio.phase4_diff.REMOVED_COLUMNS`
-- `boexio.phase5_report.build_worksheets`
-- `boexio.phase5_report.validate_errors_csv`
-- `boexio.xlsx_writer.write_xlsx`
+次は全カテゴリ 3 商品ずつのスモーク run を実施し、カテゴリごとの属性差異と取得可否を確認する段階。
 
-Phase 3 の成果物イメージ:
+優先候補:
 
-```text
-data/runs/<run_id>/
-  products_current.csv
-  products_YYYY-MM-DD_<run_id>.csv
-  variant_candidates.csv
-  discovered_product_urls.csv
-  errors.csv
-  scrape_log.txt
-  run_metadata.json
-  raw/
-```
+1. `config/target_categories.csv` のカテゴリ URL が現行サイトで有効か確認し、全カテゴリ 3 商品ずつの Phase 3 smoke run を行う。
+2. Fixture または smoke run を使って Phase 5 レポートを再生成し、`current_master` のカテゴリ付き表示を営業確認する。
+3. カテゴリ固有属性を固定列で増やすか、`selected_attributes_json` のような key/value 形式にするかを判断する。
+4. URL リスト管理者、価格改定レポート確認責任者、正式連絡先を決める。
 
 ## 残っている判断事項
 
@@ -209,10 +207,12 @@ data/runs/<run_id>/
 - 正式な連絡先メールアドレス。
 - 問い合わせ対応窓口。
 - 他商品で attributeId が変わるか。
-- 他カテゴリへ広げる場合、固定列ではなく構成属性 key/value 形式にするか。
+- カテゴリ固有属性を固定列ではなく key/value 形式にするか。
+- `config/target_categories.csv` の初期カテゴリが UI 上の全カテゴリを網羅しているか。
 - チェアカテゴリの 23 件が UI 上の全件か、追加読み込み API でさらに増えるか。
 - Phase 4 の `removed_items` を次回 run の状態入力としてどう保存・引き継ぐか。
 - Excel レポートの確認責任者と確認期限。
-- GitHub Actions の通知先 secret 名と通知先実体。
+- GitHub Actions の通知先実体。
 - 正式な連絡先メールアドレス。
-- GitHub Releases の長期保存期間を将来削除する場合の運用方針。
+- 見積に使う価格の社内丸め・割引・掛け率ルール。
+- カテゴリ固有属性を固定列で増やすか、key/value JSON で持つか。
