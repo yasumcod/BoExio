@@ -37,6 +37,7 @@ on:
         default: ""
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -205,6 +206,7 @@ jobs:
       matrix: ${{ fromJson(needs.discover-products.outputs.chunk_matrix) }}
     env:
       BOEXIO_CONTACT_EMAIL: ${{ secrets.BOEXIO_CONTACT_EMAIL }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -215,10 +217,31 @@ jobs:
           python-version: "3.12"
 
       - name: Download product matrix artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}
-          path: matrix
+        shell: bash
+        run: |
+          retry_gh_download() {
+            local attempt=1
+            local max_attempts=5
+            local delay_seconds=5
+            local exit_code=0
+
+            until gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" "$@"; do
+              exit_code="$?"
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Artifact download failed after ${attempt} attempts: gh run download $GITHUB_RUN_ID $*" >&2
+                return "$exit_code"
+              fi
+              echo "Artifact download failed with exit code ${exit_code}; retrying in ${delay_seconds}s: gh run download $GITHUB_RUN_ID $*" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+          }
+
+          mkdir -p matrix
+          retry_gh_download \
+            --name "boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}" \
+            --dir matrix
 
       - name: Scrape product chunk
         id: scrape
@@ -275,18 +298,60 @@ jobs:
       - name: Download product matrix artifact
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}
-          path: matrix
+        shell: bash
+        run: |
+          retry_gh_download() {
+            local attempt=1
+            local max_attempts=5
+            local delay_seconds=5
+            local exit_code=0
+
+            until gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" "$@"; do
+              exit_code="$?"
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Artifact download failed after ${attempt} attempts: gh run download $GITHUB_RUN_ID $*" >&2
+                return "$exit_code"
+              fi
+              echo "Artifact download failed with exit code ${exit_code}; retrying in ${delay_seconds}s: gh run download $GITHUB_RUN_ID $*" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+          }
+
+          mkdir -p matrix
+          retry_gh_download \
+            --name "boexio-weekly-matrix-${{ needs.discover-categories.outputs.run_date }}" \
+            --dir matrix
 
       - name: Download chunk artifacts
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          pattern: boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-*
-          path: chunk_artifacts
+        shell: bash
+        run: |
+          retry_gh_download() {
+            local attempt=1
+            local max_attempts=5
+            local delay_seconds=5
+            local exit_code=0
+
+            until gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" "$@"; do
+              exit_code="$?"
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Artifact download failed after ${attempt} attempts: gh run download $GITHUB_RUN_ID $*" >&2
+                return "$exit_code"
+              fi
+              echo "Artifact download failed with exit code ${exit_code}; retrying in ${delay_seconds}s: gh run download $GITHUB_RUN_ID $*" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+          }
+
+          mkdir -p chunk_artifacts
+          retry_gh_download \
+            --pattern "boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-*" \
+            --dir chunk_artifacts
 
       - name: Download previous release CSV
         id: previous
