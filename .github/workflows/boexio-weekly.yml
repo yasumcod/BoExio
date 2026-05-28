@@ -35,8 +35,6 @@ on:
         description: "Optional chunk_slug filter for rerun planning; blank means all discovered chunks"
         required: false
         default: ""
-  schedule:
-    - cron: "0 14 28 5 *"
 
 permissions:
   contents: write
@@ -64,31 +62,16 @@ jobs:
       workflow_yaml_exit: ${{ steps.validation.outputs.workflow_yaml_exit }}
       py_compile_exit: ${{ steps.validation.outputs.py_compile_exit }}
       tests_exit: ${{ steps.validation.outputs.tests_exit }}
-      should_run: ${{ steps.one_time_guard.outputs.should_run }}
     steps:
-      - name: Check one-time schedule window
-        id: one_time_guard
-        shell: bash
-        run: |
-          should_run="true"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%F)" != "2026-05-28" ]; then
-            should_run="false"
-            echo "Skipping scheduled run outside 2026-05-28 UTC."
-          fi
-          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
-
       - name: Check out repository
-        if: steps.one_time_guard.outputs.should_run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: steps.one_time_guard.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Prepare run variables
-        if: steps.one_time_guard.outputs.should_run == 'true'
         id: vars
         shell: bash
         run: |
@@ -131,7 +114,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate workflow and Python
-        if: steps.one_time_guard.outputs.should_run == 'true'
         id: validation
         shell: bash
         run: |
@@ -150,7 +132,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Generate category matrix
-        if: steps.one_time_guard.outputs.should_run == 'true'
         id: category_matrix
         shell: bash
         run: |
@@ -160,7 +141,7 @@ jobs:
           echo "category_matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
       - name: Upload category matrix artifact
-        if: ${{ always() && steps.one_time_guard.outputs.should_run == 'true' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: boexio-weekly-categories-${{ steps.vars.outputs.run_date }}
@@ -172,7 +153,6 @@ jobs:
   discover-products:
     runs-on: ubuntu-latest
     needs: discover-categories
-    if: needs.discover-categories.outputs.should_run == 'true'
     outputs:
       chunk_matrix: ${{ steps.chunk_matrix.outputs.chunk_matrix }}
     env:
@@ -219,7 +199,6 @@ jobs:
     needs:
       - discover-categories
       - discover-products
-    if: needs.discover-categories.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -275,7 +254,7 @@ jobs:
 
   merge-report:
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.discover-categories.outputs.should_run == 'true' }}
+    if: always()
     needs:
       - discover-categories
       - discover-products
