@@ -10,11 +10,11 @@ on:
       product_limit_per_category:
         description: "Maximum products to discover per category; 0 means all products"
         required: false
-        default: "3"
+        default: "0"
       variant_limit_per_product:
         description: "Maximum variants per product to fetch in Phase 3; 0 means all variants"
         required: false
-        default: "1"
+        default: "0"
       chunk_size:
         description: "Products per scrape matrix chunk"
         required: false
