@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -168,8 +168,17 @@ def validate_discovered_product_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
+def request_safe_url(url: str) -> str:
+    parsed = urlsplit(url)
+    path = quote(unquote(parsed.path), safe="/:@")
+    query = quote(unquote(parsed.query), safe="=&?/:;+,@")
+    fragment = quote(unquote(parsed.fragment), safe="=&?/:;+,@")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
+
+
 def fetch_url(url: str, timeout: int) -> FetchResult:
-    request = Request(url, headers={"User-Agent": USER_AGENT})
+    safe_url = request_safe_url(url)
+    request = Request(safe_url, headers={"User-Agent": USER_AGENT})
     checked_at = datetime.now(timezone.utc).isoformat()
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -183,12 +192,12 @@ def fetch_url(url: str, timeout: int) -> FetchResult:
     except URLError as exc:
         reason = str(exc.reason)
         if "unknown url type: https" in reason or "CERTIFICATE_VERIFY_FAILED" in reason:
-            return fetch_url_with_curl(url, timeout, checked_at)
+            return fetch_url_with_curl(url, safe_url, timeout, checked_at)
         code = "TIMEOUT_CONNECT" if "timed out" in reason.lower() else "UNKNOWN"
         raise RuntimeError(f"{code}: {reason}") from exc
 
 
-def fetch_url_with_curl(url: str, timeout: int, checked_at: str) -> FetchResult:
+def fetch_url_with_curl(url: str, safe_url: str, timeout: int, checked_at: str) -> FetchResult:
     marker = "__BOEXIO_HTTP_STATUS__:"
     result = subprocess.run(
         [
@@ -201,7 +210,7 @@ def fetch_url_with_curl(url: str, timeout: int, checked_at: str) -> FetchResult:
             USER_AGENT,
             "-w",
             f"\n{marker}%{{http_code}}",
-            url,
+            safe_url,
         ],
         check=False,
         capture_output=True,

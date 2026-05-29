@@ -2,7 +2,7 @@ import csv
 import unittest
 from pathlib import Path
 
-from boexio.phase1_poc import FetchResult, parse_product
+from boexio.phase1_poc import FetchResult, parse_product, request_safe_url
 from boexio.phase2_variants import enrich_row, generate_variant_key, normalize_attribute
 from boexio.phase2_variants import extract_candidates
 
@@ -13,6 +13,16 @@ HTML_FIXTURE = FIXTURE_DIR / "phase2_product_fixture.html"
 
 
 class Phase2VariantTests(unittest.TestCase):
+    def test_request_safe_url_percent_encodes_non_ascii_path(self):
+        self.assertEqual(
+            "https://www.boconcept.com/ja-jp/p/boucl%C3%A9-single/107_19014480-1:23-2:187/",
+            request_safe_url("https://www.boconcept.com/ja-jp/p/bouclé-single/107_19014480-1:23-2:187/"),
+        )
+        self.assertEqual(
+            "https://www.boconcept.com/ja-jp/p/canc%C3%BAn/3000680-2:345-4:0128/",
+            request_safe_url("https://www.boconcept.com/ja-jp/p/canc%C3%BAn/3000680-2:345-4:0128/"),
+        )
+
     def test_normalize_attribute_applies_nfkc_synonyms_and_separator_rules(self):
         normalized = normalize_attribute("  Ｆａｂｒｉｃ／自然・無垢材オーク脚  ")
 

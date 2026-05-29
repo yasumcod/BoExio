@@ -244,6 +244,7 @@ def stage(args: argparse.Namespace) -> int:
         "notes": [
             "Phase 6 retrieves phase3_products_current.csv from the latest previous GitHub Release when available.",
             "If no previous CSV is available, an empty Phase 2 schema CSV is used so the first run reports current rows as new items.",
+            "partial_success publishes usable artifacts while listing failed chunks; failed or missing phases fail the workflow.",
             "TODO: Decide the long-term GitHub Releases retention/deletion policy.",
             "TODO: Decide the production notification destination and formal BOEXIO_CONTACT_EMAIL value.",
         ],

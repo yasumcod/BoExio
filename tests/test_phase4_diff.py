@@ -108,6 +108,12 @@ class Phase4DiffTests(unittest.TestCase):
 
         self.assertEqual([], validate_columns([legacy_row], "previous.csv"))
 
+    def test_legacy_run_id_column_is_backward_compatible(self):
+        legacy_row = row("a")
+        legacy_row.pop("run_id")
+
+        self.assertEqual([], validate_columns([legacy_row], "previous.csv"))
+
 
 if __name__ == "__main__":
     unittest.main()

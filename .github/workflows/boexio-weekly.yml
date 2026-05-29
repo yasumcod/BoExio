@@ -516,8 +516,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.stage.outputs.run_status }}" = "success" ]; then
-            exit 0
-          fi
+          case "${{ steps.stage.outputs.run_status }}" in
+            success|partial_success)
+              exit 0
+              ;;
+          esac
           echo "BoExio weekly report finished with run_status=${{ steps.stage.outputs.run_status }}"
           exit 1

@@ -15,7 +15,7 @@ from boexio.phase2_variants import ERROR_COLUMNS, PHASE2_CSV_COLUMNS, write_erro
 PHASE4_PARSER_VERSION = "0.4.0"
 DIFF_SCHEMA_VERSION = "0.1.0"
 DISCONTINUED_AFTER_MISSING_STREAK = 4
-BACKWARD_COMPATIBLE_PHASE2_COLUMNS = {"category_name", "category_url"}
+BACKWARD_COMPATIBLE_PHASE2_COLUMNS = {"category_name", "category_url", "run_id"}
 
 PRICE_CHANGE_COLUMNS = [
     "run_id",

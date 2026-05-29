@@ -68,6 +68,12 @@ class Phase6WorkflowTests(unittest.TestCase):
             overall_run_status([PhaseResult("phase3", Path("x"), 0, "partial_success", None)], {"tests": 0}),
         )
 
+    def test_workflow_final_gate_allows_partial_success(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
+
+        self.assertIn("success|partial_success", workflow)
+
     def test_stage_phase_outputs_copies_stable_asset_names(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
