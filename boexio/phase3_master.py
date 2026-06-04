@@ -43,7 +43,7 @@ from boexio.phase2_variants import (
 )
 
 
-PHASE3_PARSER_VERSION = "0.3.0"
+PHASE3_PARSER_VERSION = "0.3.1"
 RETRYABLE_ERROR_CODES = {"HTTP_429", "TIMEOUT_CONNECT", "TIMEOUT_READ", "RATE_LIMITED"}
 STOP_ERROR_CODES = {"HTTP_403"}
 MAX_FAILURE_RATE = 0.30
@@ -302,6 +302,264 @@ def error_code_counts(rows: list[dict[str, str]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def completeness_error_row(url: str, code: str, message: str, when: str | None = None) -> dict[str, str]:
+    checked_at = when or datetime.now(timezone.utc).isoformat()
+    return {
+        "url": url,
+        "phase": "completeness",
+        "error_code": code,
+        "message": message,
+        "first_seen_at": checked_at,
+        "last_seen_at": checked_at,
+    }
+
+
+def product_variant_completeness_entry(
+    *,
+    product_url: str,
+    category: CategoryTarget,
+    product_name: str = "",
+    product_fetch_attempt_count: int = 0,
+    product_fetch_success_count: int = 0,
+    product_fetch_failure_count: int = 0,
+    variant_candidate_count: int = 0,
+    unique_variant_candidate_count: int = 0,
+    variant_invalid_candidate_count: int = 0,
+    variant_fetch_attempt_count: int = 0,
+    variant_success_count: int = 0,
+    variant_failure_count: int = 0,
+    variant_skipped_count: int = 0,
+    variant_limit_per_product: int = 0,
+) -> dict[str, object]:
+    limit_applied = variant_limit_per_product > 0
+    reasons: list[str] = []
+    if product_fetch_attempt_count <= 0:
+        reasons.append("product_fetch_not_attempted")
+    if product_fetch_success_count <= 0:
+        if product_fetch_failure_count > 0:
+            reasons.append("product_fetch_failed")
+        elif product_fetch_attempt_count > 0:
+            reasons.append("product_fetch_incomplete")
+    if variant_invalid_candidate_count:
+        reasons.append(f"variant_invalid_candidate_count={variant_invalid_candidate_count}")
+    if limit_applied and variant_skipped_count:
+        reasons.append(f"variant_limit_applied skipped={variant_skipped_count}")
+
+    candidate_attempt_equation_ok = variant_candidate_count == (
+        variant_fetch_attempt_count + variant_skipped_count
+    )
+    fetch_result_equation_ok = variant_fetch_attempt_count == (
+        variant_success_count + variant_failure_count
+    )
+    if not candidate_attempt_equation_ok:
+        reasons.append(
+            "variant_candidate_count_mismatch "
+            f"candidate={variant_candidate_count} attempt={variant_fetch_attempt_count} skipped={variant_skipped_count}"
+        )
+    if not fetch_result_equation_ok:
+        reasons.append(
+            "variant_fetch_count_mismatch "
+            f"attempt={variant_fetch_attempt_count} success={variant_success_count} failure={variant_failure_count}"
+        )
+
+    fetch_attempt_complete = (
+        not limit_applied
+        and product_fetch_success_count > 0
+        and candidate_attempt_equation_ok
+        and fetch_result_equation_ok
+        and variant_skipped_count == 0
+    )
+    comparison_complete = (
+        fetch_attempt_complete
+        and variant_failure_count == 0
+        and variant_success_count == variant_candidate_count
+        and variant_candidate_count > 0
+    )
+    if fetch_attempt_complete and not comparison_complete:
+        reasons.append(
+            "comparison_incomplete "
+            f"candidate={variant_candidate_count} success={variant_success_count} failure={variant_failure_count}"
+        )
+
+    return {
+        "category_slug": category.slug,
+        "category_name": category.name,
+        "category_url": category.url,
+        "product_name": product_name,
+        "product_fetch_attempt_count": product_fetch_attempt_count,
+        "product_fetch_success_count": product_fetch_success_count,
+        "product_fetch_failure_count": product_fetch_failure_count,
+        "variant_candidate_count": variant_candidate_count,
+        "unique_variant_candidate_count": unique_variant_candidate_count,
+        "variant_invalid_candidate_count": variant_invalid_candidate_count,
+        "variant_fetch_attempt_count": variant_fetch_attempt_count,
+        "variant_success_count": variant_success_count,
+        "variant_failure_count": variant_failure_count,
+        "variant_skipped_count": variant_skipped_count,
+        "variant_limit_per_product": variant_limit_per_product,
+        "limit_applied": limit_applied,
+        "fetch_attempt_complete": fetch_attempt_complete,
+        "comparison_complete": comparison_complete,
+        "candidate_attempt_equation_ok": candidate_attempt_equation_ok,
+        "fetch_result_equation_ok": fetch_result_equation_ok,
+        "reasons": reasons,
+    }
+
+
+def initial_product_variant_stats(product_url: str, category: CategoryTarget) -> dict[str, object]:
+    return {
+        "product_url": product_url,
+        "category": category,
+        "product_name": "",
+        "product_fetch_attempt_count": 0,
+        "product_fetch_success_count": 0,
+        "product_fetch_failure_count": 0,
+        "variant_candidate_count": 0,
+        "unique_variant_candidate_count": 0,
+        "variant_invalid_candidate_count": 0,
+        "variant_fetch_attempt_count": 0,
+        "variant_success_count": 0,
+        "variant_failure_count": 0,
+        "variant_skipped_count": 0,
+    }
+
+
+def finalize_product_variant_completeness(
+    product_variant_stats: dict[str, dict[str, object]],
+    variant_limit_per_product: int,
+) -> tuple[dict[str, dict[str, object]], list[dict[str, str]]]:
+    completeness: dict[str, dict[str, object]] = {}
+    errors: list[dict[str, str]] = []
+    for product_url, stats in sorted(product_variant_stats.items()):
+        category = stats["category"]
+        assert isinstance(category, CategoryTarget)
+        entry = product_variant_completeness_entry(
+            product_url=product_url,
+            category=category,
+            product_name=str(stats.get("product_name", "")),
+            product_fetch_attempt_count=int(stats.get("product_fetch_attempt_count") or 0),
+            product_fetch_success_count=int(stats.get("product_fetch_success_count") or 0),
+            product_fetch_failure_count=int(stats.get("product_fetch_failure_count") or 0),
+            variant_candidate_count=int(stats.get("variant_candidate_count") or 0),
+            unique_variant_candidate_count=int(stats.get("unique_variant_candidate_count") or 0),
+            variant_invalid_candidate_count=int(stats.get("variant_invalid_candidate_count") or 0),
+            variant_fetch_attempt_count=int(stats.get("variant_fetch_attempt_count") or 0),
+            variant_success_count=int(stats.get("variant_success_count") or 0),
+            variant_failure_count=int(stats.get("variant_failure_count") or 0),
+            variant_skipped_count=int(stats.get("variant_skipped_count") or 0),
+            variant_limit_per_product=variant_limit_per_product,
+        )
+        completeness[product_url] = entry
+        reasons = [str(reason) for reason in entry.get("reasons", [])]
+        limit_only = reasons and all(reason.startswith("variant_limit_applied") for reason in reasons)
+        if not reasons or limit_only:
+            continue
+        message = f"product_url={product_url} " + "; ".join(reasons)
+        if not entry.get("candidate_attempt_equation_ok"):
+            errors.append(completeness_error_row(product_url, "variant_candidate_count_mismatch", message))
+        if not entry.get("fetch_attempt_complete") and not entry.get("limit_applied"):
+            errors.append(completeness_error_row(product_url, "incomplete_variant_fetch", message))
+        if entry.get("fetch_attempt_complete") and not entry.get("comparison_complete"):
+            errors.append(completeness_error_row(product_url, "comparison_incomplete", message))
+    return completeness, errors
+
+
+def build_category_completeness(
+    *,
+    target_categories: list[CategoryTarget],
+    discovered_rows: list[dict[str, str]],
+    selected_product_urls: list[str],
+    product_category_by_url: dict[str, CategoryTarget],
+    processed_product_urls: set[str],
+    product_limit_per_category: int,
+    product_limit: int,
+    category_pagination_summaries: dict[str, dict[str, object]],
+) -> tuple[dict[str, dict[str, object]], list[dict[str, str]]]:
+    discovered_by_slug: dict[str, list[str]] = {category.slug: [] for category in target_categories}
+    discovery_failed_by_slug: dict[str, list[str]] = {category.slug: [] for category in target_categories}
+    category_by_url = {category.url: category for category in target_categories}
+    for row in discovered_rows:
+        category = category_by_url.get(row.get("category_url", ""))
+        if not category:
+            continue
+        product_url = row.get("product_url", "")
+        if product_url:
+            discovered_by_slug.setdefault(category.slug, []).append(product_url)
+        if row.get("discovery_status") == "failed":
+            discovery_failed_by_slug.setdefault(category.slug, []).append(row.get("discovery_error", ""))
+
+    chunk_input_by_slug: dict[str, int] = {category.slug: 0 for category in target_categories}
+    processed_by_slug: dict[str, set[str]] = {category.slug: set() for category in target_categories}
+    for product_url in selected_product_urls:
+        category = product_category_by_url.get(product_url)
+        if category:
+            chunk_input_by_slug[category.slug] = chunk_input_by_slug.get(category.slug, 0) + 1
+    for product_url in processed_product_urls:
+        category = product_category_by_url.get(product_url)
+        if category:
+            processed_by_slug.setdefault(category.slug, set()).add(product_url)
+
+    limit_applied = product_limit_per_category > 0 or product_limit > 0
+    completeness: dict[str, dict[str, object]] = {}
+    errors: list[dict[str, str]] = []
+    for category in target_categories:
+        discovered = discovered_by_slug.get(category.slug, [])
+        unique_discovered = sorted(set(discovered))
+        chunk_input_count = chunk_input_by_slug.get(category.slug, 0)
+        processed_count = len(processed_by_slug.get(category.slug, set()))
+        reasons: list[str] = []
+        if limit_applied:
+            reasons.append("product_limit_applied")
+        if discovery_failed_by_slug.get(category.slug):
+            reasons.append("category_discovery_failed")
+        if not unique_discovered:
+            reasons.append("no_discovered_products")
+        if not limit_applied and len(unique_discovered) != chunk_input_count:
+            reasons.append(
+                f"discovered_vs_chunk_input_mismatch discovered={len(unique_discovered)} chunk_input={chunk_input_count}"
+            )
+        discovery_complete = not reasons
+        product_processing_complete = chunk_input_count == processed_count
+        entry = {
+            "category_name": category.name,
+            "category_url": category.url,
+            "category_slug": category.slug,
+            "discovered_product_count": len(discovered),
+            "unique_discovered_product_count": len(unique_discovered),
+            "chunk_input_product_count": chunk_input_count,
+            "processed_product_count": processed_count,
+            "product_limit_per_category": product_limit_per_category,
+            "product_limit": product_limit,
+            "limit_applied": limit_applied,
+            "discovery_complete_scope": "current_discovery_logic",
+            "discovery_complete": discovery_complete,
+            "product_processing_complete": product_processing_complete,
+            "pagination_summary": category_pagination_summaries.get(category.url, {}),
+            "reasons": reasons,
+        }
+        completeness[category.slug] = entry
+        non_limit_reasons = [reason for reason in reasons if reason != "product_limit_applied"]
+        if non_limit_reasons:
+            errors.append(
+                completeness_error_row(
+                    category.url,
+                    "incomplete_product_discovery",
+                    f"category_slug={category.slug} " + "; ".join(non_limit_reasons),
+                )
+            )
+        if not product_processing_complete:
+            errors.append(
+                completeness_error_row(
+                    category.url,
+                    "incomplete_variant_fetch",
+                    "category_slug="
+                    f"{category.slug} chunk_input_product_count={chunk_input_count} "
+                    f"processed_product_count={processed_count}",
+                )
+            )
+    return completeness, errors
+
+
 def determine_run_status(
     success_count: int,
     failure_count: int,
@@ -381,11 +639,14 @@ def run(args: argparse.Namespace) -> int:
     product_candidate_counts: dict[str, int] = {}
     product_attribute_summaries: dict[str, list[dict[str, str]]] = {}
     category_pagination_summaries: dict[str, dict[str, object]] = {}
+    product_variant_stats: dict[str, dict[str, object]] = {}
+    category_products_by_url: dict[str, list[str]] = {}
+    product_category_by_url: dict[str, CategoryTarget] = {}
+    selected_product_urls: list[str] = []
+    discovered_product_url_count = 0
     stop_reason = ""
 
     try:
-        category_products_by_url: dict[str, list[str]] = {}
-        product_category_by_url: dict[str, CategoryTarget] = {}
         seen_products: set[str] = set()
         if args.product_urls_file:
             target = target_categories[0]
@@ -481,8 +742,14 @@ def run(args: argparse.Namespace) -> int:
 
         for product_index, product_url in enumerate(selected_product_urls, start=1):
             product_category = product_category_by_url[product_url]
+            product_stats = product_variant_stats.setdefault(
+                product_url,
+                initial_product_variant_stats(product_url, product_category),
+            )
+            product_stats["product_fetch_attempt_count"] = int(product_stats["product_fetch_attempt_count"]) + 1
             try:
                 product_page = fetch_with_control(product_url, args.timeout, args.retries, limiter)
+                product_stats["product_fetch_success_count"] = int(product_stats["product_fetch_success_count"]) + 1
                 raw_name = safe_raw_name("product", product_index, product_url)
                 (raw_dir / raw_name).write_text(product_page.html, encoding="utf-8")
                 product_attribute_summaries[product_url] = configuration_attribute_summary(product_page.html)
@@ -496,9 +763,23 @@ def run(args: argparse.Namespace) -> int:
                     )
                 product_candidate_counts[product_url] = len(product_candidates)
                 candidates.extend(product_candidates)
+                pending_candidates = [
+                    candidate for candidate in product_candidates if candidate.candidate_status == "pending"
+                ]
+                product_stats["variant_candidate_count"] = len(product_candidates)
+                product_stats["unique_variant_candidate_count"] = len(
+                    {candidate.variant_url for candidate in product_candidates if candidate.variant_url}
+                )
+                product_stats["variant_invalid_candidate_count"] = len(product_candidates) - len(pending_candidates)
 
                 selected_candidates = select_variant_candidates(product_candidates, args.variant_limit_per_product)
+                product_stats["variant_skipped_count"] = (
+                    max(len(pending_candidates) - len(selected_candidates), 0)
+                    if args.variant_limit_per_product > 0
+                    else 0
+                )
                 for candidate_index, candidate in enumerate(selected_candidates, start=1):
+                    product_stats["variant_fetch_attempt_count"] = int(product_stats["variant_fetch_attempt_count"]) + 1
                     try:
                         variant_page = fetch_with_control(
                             candidate.variant_url,
@@ -513,13 +794,18 @@ def run(args: argparse.Namespace) -> int:
                         )
                         raw_path = raw_dir / raw_name
                         raw_path.write_text(variant_page.html, encoding="utf-8")
-                        rows.append(add_category_metadata(parse_product(variant_page, f"raw/{raw_name}", run_id), product_category))
+                        parsed_row = parse_product(variant_page, f"raw/{raw_name}", run_id)
+                        if parsed_row.get("product_name") and not product_stats.get("product_name"):
+                            product_stats["product_name"] = parsed_row["product_name"]
+                        rows.append(add_category_metadata(parsed_row, product_category))
+                        product_stats["variant_success_count"] = int(product_stats["variant_success_count"]) + 1
                         logs.append(f"fetched_variant_url={candidate.variant_url}")
                     except StopRunError:
                         raise
                     except Exception as exc:
                         code, detail = split_error(exc)
                         rows.append(add_category_metadata(failed_row(run_id, candidate.variant_url, code, detail), product_category))
+                        product_stats["variant_failure_count"] = int(product_stats["variant_failure_count"]) + 1
                         logs.append(f"failed_variant_url={candidate.variant_url} code={code} detail={detail}")
             except StopRunError as exc:
                 stop_reason = str(exc)
@@ -527,13 +813,31 @@ def run(args: argparse.Namespace) -> int:
             except Exception as exc:
                 code, detail = split_error(exc)
                 rows.append(add_category_metadata(failed_row(run_id, product_url, code, detail), product_category))
+                product_stats["product_fetch_failure_count"] = int(product_stats["product_fetch_failure_count"]) + 1
                 logs.append(f"failed_product_url={product_url} code={code} detail={detail}")
     except StopRunError as exc:
         stop_reason = str(exc)
         logs.append(f"run_stopped={stop_reason}")
 
+    discovered_product_url_count = len(product_category_by_url)
     enriched_rows = enrich_rows(rows)
     errors = error_rows(enriched_rows)
+    product_variant_completeness, product_completeness_errors = finalize_product_variant_completeness(
+        product_variant_stats,
+        args.variant_limit_per_product,
+    )
+    category_completeness, category_completeness_errors = build_category_completeness(
+        target_categories=target_categories,
+        discovered_rows=discovered_rows,
+        selected_product_urls=selected_product_urls,
+        product_category_by_url=product_category_by_url,
+        processed_product_urls=set(product_variant_stats),
+        product_limit_per_category=args.product_limit_per_category,
+        product_limit=args.product_limit,
+        category_pagination_summaries=category_pagination_summaries,
+    )
+    errors.extend(product_completeness_errors)
+    errors.extend(category_completeness_errors)
 
     current_path = output_dir / "products_current.csv"
     snapshot_path = output_dir / f"products_{started_at.strftime('%Y-%m-%d')}_{run_id}.csv"
@@ -567,6 +871,56 @@ def run(args: argparse.Namespace) -> int:
         schema_mismatch_count,
         stop_reason,
     )
+    full_variant_run = (
+        args.product_limit <= 0
+        and args.product_limit_per_category <= 0
+        and args.variant_limit_per_product <= 0
+    )
+    if full_variant_run:
+        incomplete_discovery_categories = [
+            slug for slug, entry in category_completeness.items() if not entry.get("discovery_complete")
+        ]
+        unprocessed_category_products = [
+            slug
+            for slug, entry in category_completeness.items()
+            if not entry.get("product_processing_complete")
+        ]
+        incomplete_fetch_products = [
+            product_url
+            for product_url, entry in product_variant_completeness.items()
+            if not entry.get("fetch_attempt_complete")
+        ]
+        comparison_incomplete_products = [
+            product_url
+            for product_url, entry in product_variant_completeness.items()
+            if entry.get("fetch_attempt_complete") and not entry.get("comparison_complete")
+        ]
+        if incomplete_discovery_categories or unprocessed_category_products or incomplete_fetch_products:
+            run_status = "failed"
+            run_status_reasons.extend(
+                [
+                    f"discovery_complete=false categories={','.join(incomplete_discovery_categories)}"
+                    if incomplete_discovery_categories
+                    else "",
+                    f"product_processing_complete=false categories={','.join(unprocessed_category_products)}"
+                    if unprocessed_category_products
+                    else "",
+                    f"fetch_attempt_complete=false product_count={len(incomplete_fetch_products)}"
+                    if incomplete_fetch_products
+                    else "",
+                ]
+            )
+            run_status_reasons = [reason for reason in run_status_reasons if reason]
+        elif comparison_incomplete_products:
+            run_status = "partial_success"
+            run_status_reasons = [
+                reason
+                for reason in run_status_reasons
+                if not reason.startswith("failure_rate ") and not reason.startswith("failure_count ")
+            ]
+            run_status_reasons.append(
+                f"comparison_complete=false product_count={len(comparison_incomplete_products)}"
+            )
 
     checksum_targets = [
         current_path,
@@ -608,11 +962,26 @@ def run(args: argparse.Namespace) -> int:
         "discovered_product_counts_by_category": discovered_counts_by_category,
         "selected_product_count": len(selected_product_urls),
         "selected_product_counts_by_category": selected_counts_by_category,
-        "processed_product_count": len(product_candidate_counts),
+        "processed_product_count": len(product_variant_stats),
         "product_candidate_counts": product_candidate_counts,
         "product_attribute_summaries": product_attribute_summaries,
+        "category_completeness": category_completeness,
+        "product_variant_completeness": product_variant_completeness,
         "category_pagination_summaries": category_pagination_summaries,
         "variant_candidate_count": len(candidates),
+        "variant_fetch_attempt_count": sum(
+            int(entry.get("variant_fetch_attempt_count") or 0)
+            for entry in product_variant_completeness.values()
+        ),
+        "variant_success_count": sum(
+            int(entry.get("variant_success_count") or 0) for entry in product_variant_completeness.values()
+        ),
+        "variant_failure_count": sum(
+            int(entry.get("variant_failure_count") or 0) for entry in product_variant_completeness.values()
+        ),
+        "variant_skipped_count": sum(
+            int(entry.get("variant_skipped_count") or 0) for entry in product_variant_completeness.values()
+        ),
         "variant_key_success_count": sum(1 for row in enriched_rows if row.get("variant_key")),
         "error_count": len(errors),
         "scrape_error_code_counts": scrape_error_code_counts,

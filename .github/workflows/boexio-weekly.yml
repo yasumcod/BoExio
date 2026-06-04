@@ -177,6 +177,7 @@ jobs:
             --run-id "${{ needs.discover-categories.outputs.run_id }}-discover-products" \
             --product-limit "${{ needs.discover-categories.outputs.product_limit }}" \
             --product-limit-per-category "${{ needs.discover-categories.outputs.product_limit_per_category }}" \
+            --variant-limit-per-product "${{ needs.discover-categories.outputs.variant_limit_per_product }}" \
             --chunk-size "${{ needs.discover-categories.outputs.chunk_size }}" \
             --request-interval "${{ needs.discover-categories.outputs.request_interval }}" \
             --retries "${{ needs.discover-categories.outputs.retries }}" \

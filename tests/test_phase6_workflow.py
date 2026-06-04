@@ -11,6 +11,7 @@ from boexio.phase6_workflow import (
     copy_if_exists,
     overall_run_status,
     prepare_previous,
+    release_body,
     release_name_for_date,
     release_tag_for_date,
     stage_phase_outputs,
@@ -73,6 +74,23 @@ class Phase6WorkflowTests(unittest.TestCase):
         workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
 
         self.assertIn("success|partial_success", workflow)
+
+    def test_release_body_lists_comparison_incomplete_categories(self):
+        body = release_body(
+            {
+                "release_name": "BoExio Weekly Report 2026-05-24",
+                "overall_run_status": "partial_success",
+                "run_id": "weekly-2026-05-24-1",
+                "previous_release_tag": "",
+                "phase_results": [],
+                "missing_categories": [],
+                "missing_chunks": [],
+                "failed_chunks": [],
+                "comparison_incomplete_categories": ["sofa"],
+            }
+        )
+
+        self.assertIn("comparison_complete_false_categories: `sofa`", body)
 
     def test_stage_phase_outputs_copies_stable_asset_names(self):
         with tempfile.TemporaryDirectory() as directory:

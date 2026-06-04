@@ -184,12 +184,16 @@ Phase 3 への導線:
 - [x] `HTTP_404` と `SCHEMA_MISMATCH` は非再試行として扱う。
 - [x] 失敗率、`SCHEMA_MISMATCH` 件数、生成済み成果物保存を含む run 全体の失敗判定を実装する。
 - [x] 403 比率や captcha 検知時の即時停止ルールを設計する。
+- [x] 全商品・全パターン取得向けに、商品 discovery、variant fetch attempt、comparison completeness を分けて metadata に出す。
+- [x] `variant_candidate_count = variant_fetch_attempt_count + variant_skipped_count` と `variant_fetch_attempt_count = variant_success_count + variant_failure_count` を検査する。
+- [x] completeness 判定が崩れた場合、既存 `errors.csv` schema を維持して `incomplete_product_discovery`、`missing_chunk_artifact`、`incomplete_variant_fetch`、`variant_candidate_count_mismatch`、`comparison_incomplete` を記録する。
 
 完了条件:
 
 - [x] URL リストから複数商品を取得できる。
 - [x] `products_current.csv` と日付付き CSV を保存できる。
 - [x] `run_status=success` / `partial_success` / `failed` を判定できる。
+- [x] full run の metadata から、カテゴリ別・商品別に `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` を確認できる。
 
 実施メモ:
 
@@ -213,6 +217,10 @@ Phase 3 への導線:
 - 失敗率、`SCHEMA_MISMATCH` 件数、停止理由を含む run 全体の失敗判定を `boexio/phase3_master.py` に実装した。
 - `run_metadata.json` に `scrape_error_code_counts`、`failure_rate`、`schema_mismatch_count`、`run_status_reasons` を保存する。
 - `run_metadata.json` に `target_categories`、`product_limit_per_category`、カテゴリ別の発見件数、選択件数を保存する。
+- `run_metadata.json` に `category_completeness` と `product_variant_completeness` を追加した。
+- `product_limit=0`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`chunk_slug` filter なしの full run では、missing chunk、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致を `failed` にする。
+- fetch attempt が完了しているが一部 variant が取得失敗または比較不可の場合は `partial_success` にする。
+- `product_limit_per_category > 0` または `variant_limit_per_product > 0` の制限実行では、limit 適用を metadata に出し、full run と同じ strict completeness gate は適用しない。
 - Phase 3 検証資料: `documents/phase3_master_findings_ja.md`。
 - Catskills 152 構成全件検証 run: `data/runs/phase3-catskills-all-variants/`。
 - 152 構成は全件 `scrape_status=success`、SKU 欠損 0、`variant_key` 欠損 0、`price_compare_value` 欠損 0、errors 0。
@@ -376,7 +384,7 @@ Phase 3 への導線:
 - Phase 4、Phase 5 は `merge-report` で結合済み Phase 3 出力に対して実行し、各 phase の終了コードと `run_metadata.json` の `run_status` を Phase 6 metadata に集約する。
 - 前回 CSV は最新の過去 GitHub Release asset `phase3_products_current.csv` から取得する。初回など前回 CSV がない場合は Phase 2 schema の空 CSV を生成し、今回行を new item として扱う。
 - `artifacts/` に CSV、Excel、metadata、errors、workflow logs、tar.gz bundle、Release body を集約し、GitHub Actions artifact と GitHub Release assets の両方に保存する。
-- Release 本文と `phase6_metadata.json` には、欠落カテゴリ、欠落チャンク、失敗チャンクを出力する。
+- Release 本文と `phase6_metadata.json` には、欠落カテゴリ、欠落チャンク、失敗チャンク、`comparison_complete=false` のカテゴリを出力する。
 - artifact retention は 30 日。
 - Release tag は `weekly-YYYY-MM-DD`、Release name は `BoExio Weekly Report YYYY-MM-DD`。
 - `BOEXIO_CONTACT_EMAIL` は任意 secret として env に渡す。未設定時は既存既定値で動く。
@@ -430,7 +438,8 @@ Phase 3 への導線:
 - 取得 job は `max-parallel: 2` を初期値にし、チャンクが多数あっても同時実行は最大 2 job までに制限する。
 - Release 作成と asset upload はカテゴリ job やチャンク job では行わず、集約 job だけで実行する。
 - `category_slug` は既存カテゴリ mapping 優先、未知カテゴリは ASCII 化または `category-<sha1先頭10桁>` にする。
-- 必須カテゴリ欠落または期待チャンク欠落は `overall_run_status=failed`、生成済みチャンク内の取得失敗は `partial_success` とする。
+- full run では `category_completeness` を aggregate gate とし、必須カテゴリ欠落、期待チャンク欠落、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致は `overall_run_status=failed`、fetch attempt 完了後の取得失敗または比較不可は `partial_success` とする。
+- 専用カテゴリ workflow は今回追加せず、既存 workflow の `category_slug`、`chunk_size=1`、`product_limit_per_category=0`、`variant_limit_per_product=0` でカテゴリ単独 full run を検証する。
 - Phase 7 標準カラム定義は `boexio/quote_columns.py` に追加した。
 - Phase 5 の `current_master` は、識別、商品、構成、価格、状態、参照、監査の順に固定した。
 - Phase 7 標準カラムに `category_name` / `category_url` を追加し、カテゴリ別の営業確認ができるようにした。

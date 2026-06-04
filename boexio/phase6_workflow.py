@@ -238,6 +238,10 @@ def stage(args: argparse.Namespace) -> int:
         "missing_categories": phase3_metadata.get("missing_categories", []),
         "missing_chunks": phase3_metadata.get("missing_chunks", []),
         "failed_chunks": phase3_metadata.get("failed_chunks", []),
+        "discovery_incomplete_categories": phase3_metadata.get("discovery_incomplete_categories", []),
+        "fetch_incomplete_categories": phase3_metadata.get("fetch_incomplete_categories", []),
+        "comparison_incomplete_categories": phase3_metadata.get("comparison_incomplete_categories", []),
+        "phase3_run_status_reasons": phase3_metadata.get("run_status_reasons", []),
         "category_product_row_counts": phase3_metadata.get("category_product_row_counts", {}),
         "chunk_product_row_counts": phase3_metadata.get("chunk_product_row_counts", {}),
         "output_files": sorted(set(copied)),
@@ -288,9 +292,14 @@ def release_body(metadata: dict) -> str:
     missing_categories = metadata.get("missing_categories", [])
     missing_chunks = metadata.get("missing_chunks", [])
     failed_chunks = metadata.get("failed_chunks", [])
+    comparison_incomplete_categories = metadata.get("comparison_incomplete_categories", [])
     lines.append(f"- missing_categories: `{', '.join(missing_categories) if missing_categories else 'none'}`")
     lines.append(f"- missing_chunks: `{', '.join(missing_chunks) if missing_chunks else 'none'}`")
     lines.append(f"- failed_chunks: `{', '.join(failed_chunks) if failed_chunks else 'none'}`")
+    lines.append(
+        "- comparison_complete_false_categories: "
+        f"`{', '.join(comparison_incomplete_categories) if comparison_incomplete_categories else 'none'}`"
+    )
     lines.extend(
         [
             "",

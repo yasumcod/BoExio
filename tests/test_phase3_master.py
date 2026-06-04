@@ -6,6 +6,7 @@ from boexio.phase3_master import (
     CategoryTarget,
     add_category_metadata,
     category_slug,
+    product_variant_completeness_entry,
     read_target_categories,
     read_product_urls_file,
     select_products_by_category,
@@ -110,6 +111,79 @@ class Phase3MasterTests(unittest.TestCase):
 
         self.assertEqual(candidates[:2], select_variant_candidates(candidates, 0))
         self.assertEqual(candidates[:1], select_variant_candidates(candidates, 1))
+
+    def test_product_variant_completeness_marks_complete_attempts(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("ソファ", "https://www.boconcept.com/ja-jp/shop/sofa/", "sofa"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=2,
+            unique_variant_candidate_count=2,
+            variant_fetch_attempt_count=2,
+            variant_success_count=2,
+            variant_failure_count=0,
+            variant_skipped_count=0,
+            variant_limit_per_product=0,
+        )
+
+        self.assertTrue(entry["fetch_attempt_complete"])
+        self.assertTrue(entry["comparison_complete"])
+
+    def test_product_variant_completeness_keeps_comparison_separate_from_attempts(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("ソファ", "https://www.boconcept.com/ja-jp/shop/sofa/", "sofa"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=2,
+            unique_variant_candidate_count=2,
+            variant_fetch_attempt_count=2,
+            variant_success_count=1,
+            variant_failure_count=1,
+            variant_skipped_count=0,
+            variant_limit_per_product=0,
+        )
+
+        self.assertTrue(entry["fetch_attempt_complete"])
+        self.assertFalse(entry["comparison_complete"])
+
+    def test_product_variant_completeness_detects_fetch_attempt_mismatch(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("ソファ", "https://www.boconcept.com/ja-jp/shop/sofa/", "sofa"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=2,
+            unique_variant_candidate_count=2,
+            variant_fetch_attempt_count=1,
+            variant_success_count=1,
+            variant_failure_count=0,
+            variant_skipped_count=0,
+            variant_limit_per_product=0,
+        )
+
+        self.assertFalse(entry["fetch_attempt_complete"])
+        self.assertFalse(entry["candidate_attempt_equation_ok"])
+
+    def test_variant_limit_records_intentionally_skipped_candidates(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("ソファ", "https://www.boconcept.com/ja-jp/shop/sofa/", "sofa"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=4,
+            unique_variant_candidate_count=4,
+            variant_fetch_attempt_count=1,
+            variant_success_count=1,
+            variant_failure_count=0,
+            variant_skipped_count=3,
+            variant_limit_per_product=1,
+        )
+
+        self.assertTrue(entry["limit_applied"])
+        self.assertEqual(3, entry["variant_skipped_count"])
+        self.assertFalse(entry["fetch_attempt_complete"])
 
     def test_add_category_metadata_preserves_source_row(self):
         row = {"source_url": "https://example.test/product"}

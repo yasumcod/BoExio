@@ -39,6 +39,15 @@
 - チャンク別 `run_metadata.json` の失敗率、schema mismatch 件数、403、captcha、challenge の有無。
 - `max-parallel` が 2 のまま運用されているか。
 
+全商品・全パターン取得を行った場合は、追加で次を確認する。
+
+- `phase3_run_metadata.json` の `category_completeness` で、カテゴリ別に `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` を確認する。
+- `product_variant_completeness` で、商品別に `variant_candidate_count`、`variant_fetch_attempt_count`、`variant_success_count`、`variant_failure_count`、`variant_skipped_count` を確認する。
+- full run では `variant_candidate_count = variant_fetch_attempt_count + variant_skipped_count`、`variant_fetch_attempt_count = variant_success_count + variant_failure_count` が崩れていないか確認する。
+- チェア、ソファなど張地が多いカテゴリで、後半の商品または後半 variant が欠落していないか。
+- 欠落がある場合、workflow / job timeout、retry 増加、chunk artifact 欠落、候補生成漏れのどれに近いか。
+- 全カテゴリ一括実行で欠落した場合は、まず既存 workflow のカテゴリ指定 `workflow_dispatch` で再実行する。専用カテゴリ workflow は、既存 input で運用できない理由が明確になるまで追加しない。
+
 ## 3. 停止後の再開手順
 
 自動停止、captcha/challenge 検知、403 増加、schema mismatch、GitHub Actions 障害のいずれかで停止した場合は、即時に連続再実行しない。
@@ -61,11 +70,29 @@
 4. 403、captcha、challenge が出た場合は `max-parallel` を増やさず、必要なら 1 へ下げる。
 5. `variant_limit_per_product=0` は全パターン取得を意味するため、再開確認ではまず `1` を指定する。
 
+全パターン取得でカテゴリ途中の欠落が疑われる場合:
+
+1. 欠落カテゴリの `run_metadata.json` で `category_completeness` と `product_variant_completeness` を確認し、`discovery_complete`、`fetch_attempt_complete`、`comparison_complete` のどこで false になったか切り分ける。
+2. workflow / job timeout が疑わしい場合は、該当カテゴリだけを再実行し、必要に応じて `chunk_size=1` まで下げる。
+3. カテゴリ単独 full run は、まず次の input で実行する。
+
+```text
+category_slug=sofa
+chunk_size=1
+product_limit_per_category=0
+variant_limit_per_product=0
+request_interval=5
+retries=2
+```
+
+4. 再実行でも同じ商品・同じ variant で止まる場合は、実行時間ではなく schema mismatch、URL 生成、サイト側応答の問題として切り分ける。
+
 カテゴリ分割実行の status 判断:
 
-- 全チャンク成功: `overall_run_status=success`
-- 必須カテゴリ欠落、商品数 0 のカテゴリ、期待チャンク artifact 欠落: `overall_run_status=failed`
-- チャンク artifact が存在し、チャンク内に取得失敗がある場合: `overall_run_status=partial_success`
+- full run で全カテゴリの `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` が true: `overall_run_status=success`
+- full run で fetch attempt は完了したが、一部 variant が取得失敗または比較不可: `overall_run_status=partial_success`
+- full run で必須カテゴリ欠落、商品数 0 のカテゴリ、期待チャンク artifact 欠落、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致: `overall_run_status=failed`
+- `product_limit_per_category > 0` または `variant_limit_per_product > 0` の制限実行では、full run と同じ strict completeness gate は適用しない。metadata の limit 適用有無を確認する。
 - 重複 `variant_key` / `source_url` は最初の行を採用し、重複を `errors.csv` に記録する。この場合は `partial_success` として確認対象にする。
 
 再開判断の記録先:
@@ -119,6 +146,7 @@
 - `max-parallel: 2` の安定 run が 2 回以上続いている。
 - `request_interval` と並列数を掛け合わせたサイト全体の実効アクセス頻度が許容できる。
 - 重いカテゴリや 100 パターン以上の商品が多い場合は、並列数を増やすより先に `chunk_size` を下げる。
+- 全パターン取得で欠落が出た場合は、並列数増加で解決しようとせず、カテゴリ単独実行と chunk_size 縮小を先に行う。専用カテゴリ workflow は、既存 input で運用できない理由が明確になった場合だけ検討する。
 
 ## 6. 障害時の復旧目標
 

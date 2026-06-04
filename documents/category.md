@@ -32,6 +32,16 @@
 
 カテゴリ単位で商品 URL を発見し、商品 URL を 5 件単位のチャンクへ分割する。取得は商品チャンク単位の matrix job で実行し、最後にチャンク成果物を 1 つの Phase 3 出力へ集約する。
 
+全商品・全パターン取得では、チェア、ソファなど張地が多いカテゴリほど 1 商品あたりの variant 候補数が大きくなり、単一 workflow / 単一 job の逐次実行では完了前にタイムアウトまたは実行時間上限へ到達する可能性が高い。このため、今後は「全カテゴリを 1 つの workflow で一括取得する」ことを前提にせず、カテゴリごとに確実に完走できる workflow または workflow input を用意する方針とする。
+
+カテゴリ別 workflow 方針:
+
+- チェア、ソファのように張地・脚などの構成候補が多いカテゴリは、専用 workflow または専用 `workflow_dispatch` input で単独実行できるようにする。
+- 軽いカテゴリは共通 workflow の category matrix で扱ってよいが、重いカテゴリとは同じ完了時間前提にしない。
+- 1 回の実行で全カテゴリを網羅できなかった場合も、カテゴリ別成果物と集約 metadata から欠落カテゴリを特定し、該当カテゴリだけを再実行できるようにする。
+- 完了判定は「workflow が成功したか」ではなく、「期待カテゴリ、期待商品 URL、期待 variant 候補がすべて成果物に現れているか」で行う。
+- 全パターン取得の正式運用前に、カテゴリごとの商品数、variant 候補数、実行時間、失敗率を計測し、カテゴリ別の chunk_size と実行単位を決める。
+
 処理構成:
 
 1. `discover-categories`
@@ -221,6 +231,40 @@ strategy:
 
 チャンク分割では、1 カテゴリまたは 1 チャンクの失敗で全成果物を完全に失うことは避ける。
 
+全パターン欠落の主な仮説:
+
+- GitHub Actions job または workflow 全体の実行時間上限に到達した。
+- 張地が多い商品で variant URL 数が増え、`request_interval` を守った結果、想定より実行時間が伸びた。
+- 一部カテゴリまたはチャンクの artifact が生成されず、集約時に欠落として扱われた。
+- 取得途中の timeout / retry が積み重なり、後続商品または後続 variant まで到達しなかった。
+
+この仮説はまだ原因確定ではないため、次回以降の全取得では `run_metadata.json` にカテゴリ別・チャンク別の期待件数と実取得件数を残し、timeout、retry、artifact 欠落、候補生成漏れを切り分ける。
+
+### 6.1 completeness gate
+
+全商品・全パターン取得では、完了判定を単一 boolean にしない。Phase 3 の `run_metadata.json` には、カテゴリ別の `category_completeness` と商品別の `product_variant_completeness` を出力し、次の 3 段階を分けて確認する。
+
+- `discovery_complete`: `discovered_product_urls.csv` で発見した unique 商品 URL が、現在の discovery ロジック上すべて chunk matrix へ割り当てられた状態。カテゴリページに公式 total count がない場合、これは BoConcept サイト全体の絶対保証ではなく、現行 discovery ロジック上の完了を意味する。
+- `fetch_attempt_complete`: 発見・割り当て済み商品と、商品ごとに生成した variant candidate がすべて fetch 対象として試行された状態。missing chunk、failed chunk、candidate 数と attempt 数の不一致、途中停止で false になる。
+- `comparison_complete`: 差分比較に使える成功行が、期待 variant candidate 分そろった状態。fetch attempt が完了していても一部 variant が取得失敗または比較不可なら false になる。
+
+商品別 completeness では、次の式を満たすかを記録する。
+
+```text
+variant_candidate_count = variant_fetch_attempt_count + variant_skipped_count
+variant_fetch_attempt_count = variant_success_count + variant_failure_count
+```
+
+`variant_limit_per_product=0` の full variant mode では `variant_skipped_count` は原則 0 とする。`variant_limit_per_product > 0` または `product_limit_per_category > 0` の制限実行では、limit 適用を metadata に明示し、full run と同じ strict 判定は適用しない。
+
+`product_limit_per_category=0`、`product_limit=0`、`variant_limit_per_product=0`、かつ `chunk_slug` filter なしの full run では、aggregate completeness を `overall_run_status` に反映する。
+
+- 全カテゴリで `discovery_complete=true`、`fetch_attempt_complete=true`、`comparison_complete=true`: `success`
+- fetch attempt は完了したが、一部 variant が取得失敗または比較不可: `partial_success`
+- missing chunk、missing category、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致: `failed`
+
+completeness が崩れた箇所は、既存 `ERROR_COLUMNS` を維持したまま `errors.csv` にも記録する。主な error code は `incomplete_product_discovery`、`missing_chunk_artifact`、`incomplete_variant_fetch`、`variant_candidate_count_mismatch`、`comparison_incomplete` とする。
+
 扱い:
 
 - `scrape-product-chunk` はチャンク内の取得失敗を `errors.csv` と `run_metadata.json` に残す。
@@ -285,6 +329,16 @@ Release の作成、編集、asset upload は `merge-report` job のみで行う
 
 - `variant_limit_per_product=0` を全パターン取得の意味に拡張する。
 - `max-parallel: 2` を維持し、全チャンク完了時間、重い商品、失敗率を確認する。
+- チェア、ソファなど重いカテゴリは、既存 workflow の `category_slug` と `chunk_size=1` で単独実行し、全カテゴリ一括実行の成功を前提にしない。
+- カテゴリ別に `category_completeness` と `product_variant_completeness` を確認し、欠落があれば `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` のどこで崩れたかを切り分ける。
+
+### Step 7: カテゴリ別 workflow の運用化
+
+- 今回の completeness gate 実装時点では、専用カテゴリ workflow は追加しない。
+- 既存 workflow の `category_slug`、`chunk_slug`、`chunk_size`、`product_limit_per_category`、`variant_limit_per_product` input でカテゴリ単独 full run と chunk 単位再実行ができるため、ロジック重複を増やさない。
+- チェア、ソファなど重いカテゴリの検証は、まず `category_slug=<対象>`、`chunk_size=1`、`product_limit_per_category=0`、`variant_limit_per_product=0` で行う。
+- 実測したカテゴリ別実行時間と variant 候補数をもとに、それでも既存 workflow input では運用上不十分な場合だけ、共通 workflow を呼び出す wrapper として専用 workflow を検討する。
+- 専用 workflow を追加しても、最終成果物は引き続き結合済みの `phase3_products_current.csv` と Phase 5 Excel レポートに集約する。
 
 ## 9. 商品チャンク分割の具体例
 
@@ -336,4 +390,7 @@ chair-005: 商品 21 から 23
 - チャンク取得の公式 input は `--category-name`、`--category-url`、`--category-slug`、`--chunk-slug`、`--product-urls-file`。
 - 重複 `variant_key` と重複 `source_url` は最初の行を採用し、重複は `errors.csv` に記録する。
 - 必須カテゴリ欠落と期待チャンク欠落は `failed`、生成済みチャンク内の取得失敗は `partial_success`。
+- full run では aggregate completeness gate を適用し、candidate 数と attempt 数の不一致、missing chunk、fetch attempt 未完了を `failed` にする。
+- fetch attempt が完了しているが一部 variant が取得失敗または比較不可の場合は `partial_success` とする。
+- Release 本文には missing category、missing chunk、failed chunk に加え、`comparison_complete=false` のカテゴリを表示する。
 - `max-parallel` の初期値は 2 から変更しない。増やす場合は 403/captcha/challenge がなく、安定 run が 2 回以上続き、サイト全体の実効リクエスト頻度が許容できることを確認してから検討する。

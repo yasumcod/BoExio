@@ -193,6 +193,14 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
   - `scripts/phase3_merge.py` でチャンク CSV と metadata を集約し、従来互換の `products_current.csv` を生成する。
   - 重複 `variant_key` / `source_url` は最初の行を採用し、重複は `errors.csv` に残す。
   - 必須カテゴリ欠落または期待チャンク欠落は `failed`、生成済みチャンク内の失敗は `partial_success` とする。
+- 全商品・全パターン取得向けの completeness gate を追加した。
+  - `run_metadata.json` にカテゴリ別 `category_completeness` と商品別 `product_variant_completeness` を出力する。
+  - `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` を分け、単一 boolean の「全件取得」判定にしない。
+  - full run は `product_limit=0`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`chunk_slug` filter なしとして扱い、candidate 数と attempt 数の不一致や missing chunk を `failed` にする。
+  - fetch attempt が完了しているが一部 variant が取得失敗または比較不可の場合は `partial_success` にする。
+  - 制限実行では strict full run 判定を適用せず、limit 適用を metadata に残す。
+  - Release 本文には missing category、missing chunk、failed chunk に加え、`comparison_complete=false` のカテゴリを表示する。
+  - 専用カテゴリ workflow は追加せず、既存 workflow の `category_slug` と `chunk_size=1` でチェア、ソファなど重いカテゴリを単独検証する方針にした。
 - `.github/workflows/boexio-weekly.yml` は `discover-categories`、`discover-products`、`scrape-product-chunk`、`merge-report` の 4 job 構成になった。
   - `scrape-product-chunk` は `strategy.fail-fast: false`、`max-parallel: 2`。
   - Release 作成、編集、asset upload は `merge-report` のみで実行する。

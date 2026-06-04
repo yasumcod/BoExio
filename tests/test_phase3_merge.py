@@ -10,6 +10,9 @@ from boexio.phase3_matrix import DISCOVERED_COLUMNS
 from boexio.phase3_merge import merge_chunks
 
 
+CHAIR_URL = "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/"
+
+
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as file:
@@ -26,12 +29,93 @@ def product_row(variant_key: str, source_url: str, category_name: str = "チェ�
             "source_url": source_url,
             "scrape_status": "success",
             "category_name": category_name,
-            "category_url": "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/",
+            "category_url": CHAIR_URL,
             "variant_key": variant_key,
             "price_compare_value": "1000",
         }
     )
     return row
+
+
+def full_discovery_metadata(product_limit_per_category: int = 0, variant_limit_per_product: int = 0) -> dict:
+    return {
+        "product_limit": 0,
+        "product_limit_per_category": product_limit_per_category,
+        "variant_limit_per_product": variant_limit_per_product,
+        "target_categories": [
+            {
+                "category_name": "チェア",
+                "category_url": CHAIR_URL,
+                "category_slug": "chair",
+            }
+        ],
+        "zero_product_categories": [],
+        "category_completeness": {
+            "chair": {
+                "category_name": "チェア",
+                "category_url": CHAIR_URL,
+                "category_slug": "chair",
+                "discovered_product_count": 1,
+                "unique_discovered_product_count": 1,
+                "chunk_input_product_count": 1,
+                "processed_product_count": 0,
+                "limit_applied": product_limit_per_category > 0,
+                "discovery_complete": product_limit_per_category == 0,
+                "reasons": ["product_limit_applied"] if product_limit_per_category > 0 else [],
+            }
+        },
+    }
+
+
+def chunk_metadata(
+    *,
+    run_status: str = "success",
+    candidate_count: int = 2,
+    attempt_count: int = 2,
+    success_count: int = 2,
+    failure_count: int = 0,
+    skipped_count: int = 0,
+    fetch_attempt_complete: bool = True,
+    comparison_complete: bool = True,
+    variant_limit_per_product: int = 0,
+) -> dict:
+    product_url = "https://www.boconcept.com/ja-jp/p/chair/1/"
+    return {
+        "run_status": run_status,
+        "category_slug": "chair",
+        "category_name": "チェア",
+        "category_url": CHAIR_URL,
+        "chunk_slug": "chair-001",
+        "chunk_index": 1,
+        "chunk_product_count": 1,
+        "variant_limit_per_product": variant_limit_per_product,
+        "variant_candidate_count": candidate_count,
+        "variant_fetch_attempt_count": attempt_count,
+        "variant_success_count": success_count,
+        "variant_failure_count": failure_count,
+        "variant_skipped_count": skipped_count,
+        "product_variant_completeness": {
+            product_url: {
+                "category_slug": "chair",
+                "category_name": "チェア",
+                "category_url": CHAIR_URL,
+                "product_name": "Chair",
+                "product_fetch_attempt_count": 1,
+                "product_fetch_success_count": 1,
+                "product_fetch_failure_count": 0,
+                "variant_candidate_count": candidate_count,
+                "unique_variant_candidate_count": candidate_count,
+                "variant_fetch_attempt_count": attempt_count,
+                "variant_success_count": success_count,
+                "variant_failure_count": failure_count,
+                "variant_skipped_count": skipped_count,
+                "variant_limit_per_product": variant_limit_per_product,
+                "limit_applied": variant_limit_per_product > 0,
+                "fetch_attempt_complete": fetch_attempt_complete,
+                "comparison_complete": comparison_complete,
+            }
+        },
+    }
 
 
 class Phase3MergeTests(unittest.TestCase):
@@ -181,6 +265,191 @@ class Phase3MergeTests(unittest.TestCase):
             metadata = json.loads((out / "runs" / "merged" / "run_metadata.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", metadata["overall_run_status"])
             self.assertEqual(["chair-002"], metadata["missing_chunks"])
+            self.assertFalse(metadata["category_completeness"]["chair"]["fetch_attempt_complete"])
+
+    def test_full_run_fetch_attempt_incomplete_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chunks_dir = root / "chunks"
+            matrix_path = root / "matrix.json"
+            discovery_metadata_path = root / "discovery_metadata.json"
+            out = root / "data"
+            matrix_path.write_text(
+                json.dumps(
+                    {
+                        "include": [
+                            {
+                                "category_name": "チェア",
+                                "category_url": CHAIR_URL,
+                                "category_slug": "chair",
+                                "chunk_slug": "chair-001",
+                                "chunk_product_count": 1,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            discovery_metadata_path.write_text(json.dumps(full_discovery_metadata()), encoding="utf-8")
+            chunk = chunks_dir / "boexio-weekly-chunk-2026-05-27-chair-001"
+            chunk.mkdir(parents=True)
+            (chunk / "run_metadata.json").write_text(
+                json.dumps(
+                    chunk_metadata(
+                        candidate_count=2,
+                        attempt_count=1,
+                        success_count=1,
+                        failure_count=0,
+                        fetch_attempt_complete=False,
+                        comparison_complete=False,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            write_csv(chunk / "products_current.csv", PHASE2_CSV_COLUMNS, [product_row("vk-1", "url-1")])
+            write_csv(chunk / "variant_candidates.csv", CANDIDATE_COLUMNS, [])
+            write_csv(chunk / "discovered_product_urls.csv", DISCOVERED_COLUMNS, [])
+            write_csv(chunk / "errors.csv", ERROR_COLUMNS, [])
+
+            exit_code = merge_chunks(
+                argparse.Namespace(
+                    chunks_dir=str(chunks_dir),
+                    matrix_json=str(matrix_path),
+                    discovery_metadata=str(discovery_metadata_path),
+                    output_dir=str(out),
+                    run_id="merged",
+                )
+            )
+
+            self.assertEqual(1, exit_code)
+            metadata = json.loads((out / "runs" / "merged" / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", metadata["overall_run_status"])
+            self.assertIn("chair", metadata["fetch_incomplete_categories"])
+
+    def test_full_run_fetch_complete_with_failures_is_partial_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chunks_dir = root / "chunks"
+            matrix_path = root / "matrix.json"
+            discovery_metadata_path = root / "discovery_metadata.json"
+            out = root / "data"
+            matrix_path.write_text(
+                json.dumps(
+                    {
+                        "include": [
+                            {
+                                "category_name": "チェア",
+                                "category_url": CHAIR_URL,
+                                "category_slug": "chair",
+                                "chunk_slug": "chair-001",
+                                "chunk_product_count": 1,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            discovery_metadata_path.write_text(json.dumps(full_discovery_metadata()), encoding="utf-8")
+            chunk = chunks_dir / "boexio-weekly-chunk-2026-05-27-chair-001"
+            chunk.mkdir(parents=True)
+            (chunk / "run_metadata.json").write_text(
+                json.dumps(
+                    chunk_metadata(
+                        run_status="partial_success",
+                        candidate_count=2,
+                        attempt_count=2,
+                        success_count=1,
+                        failure_count=1,
+                        fetch_attempt_complete=True,
+                        comparison_complete=False,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            write_csv(chunk / "products_current.csv", PHASE2_CSV_COLUMNS, [product_row("vk-1", "url-1")])
+            write_csv(chunk / "variant_candidates.csv", CANDIDATE_COLUMNS, [])
+            write_csv(chunk / "discovered_product_urls.csv", DISCOVERED_COLUMNS, [])
+            write_csv(chunk / "errors.csv", ERROR_COLUMNS, [])
+
+            exit_code = merge_chunks(
+                argparse.Namespace(
+                    chunks_dir=str(chunks_dir),
+                    matrix_json=str(matrix_path),
+                    discovery_metadata=str(discovery_metadata_path),
+                    output_dir=str(out),
+                    run_id="merged",
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            metadata = json.loads((out / "runs" / "merged" / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("partial_success", metadata["overall_run_status"])
+            self.assertIn("chair", metadata["comparison_incomplete_categories"])
+            self.assertNotIn("chair-001", metadata["failed_chunks"])
+
+    def test_limited_run_does_not_apply_strict_full_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chunks_dir = root / "chunks"
+            matrix_path = root / "matrix.json"
+            discovery_metadata_path = root / "discovery_metadata.json"
+            out = root / "data"
+            matrix_path.write_text(
+                json.dumps(
+                    {
+                        "include": [
+                            {
+                                "category_name": "チェア",
+                                "category_url": CHAIR_URL,
+                                "category_slug": "chair",
+                                "chunk_slug": "chair-001",
+                                "chunk_product_count": 1,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            discovery_metadata_path.write_text(
+                json.dumps(full_discovery_metadata(product_limit_per_category=1, variant_limit_per_product=1)),
+                encoding="utf-8",
+            )
+            chunk = chunks_dir / "boexio-weekly-chunk-2026-05-27-chair-001"
+            chunk.mkdir(parents=True)
+            (chunk / "run_metadata.json").write_text(
+                json.dumps(
+                    chunk_metadata(
+                        candidate_count=4,
+                        attempt_count=1,
+                        success_count=1,
+                        failure_count=0,
+                        skipped_count=3,
+                        fetch_attempt_complete=False,
+                        comparison_complete=False,
+                        variant_limit_per_product=1,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            write_csv(chunk / "products_current.csv", PHASE2_CSV_COLUMNS, [product_row("vk-1", "url-1")])
+            write_csv(chunk / "variant_candidates.csv", CANDIDATE_COLUMNS, [])
+            write_csv(chunk / "discovered_product_urls.csv", DISCOVERED_COLUMNS, [])
+            write_csv(chunk / "errors.csv", ERROR_COLUMNS, [])
+
+            exit_code = merge_chunks(
+                argparse.Namespace(
+                    chunks_dir=str(chunks_dir),
+                    matrix_json=str(matrix_path),
+                    discovery_metadata=str(discovery_metadata_path),
+                    output_dir=str(out),
+                    run_id="merged",
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            metadata = json.loads((out / "runs" / "merged" / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("success", metadata["overall_run_status"])
+            self.assertFalse(metadata["full_run_completeness_gate"])
 
 
 if __name__ == "__main__":

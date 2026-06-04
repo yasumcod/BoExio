@@ -211,6 +211,56 @@ def discover_products(args: argparse.Namespace) -> int:
             logs.append(f"failed_category_slug={category.slug} code={code} detail={detail}")
 
     chunk_matrix = matrix_for_chunks(chunks)
+    chunk_input_counts_by_category: dict[str, int] = {}
+    for chunk in chunks:
+        chunk_input_counts_by_category[chunk.category_slug] = (
+            chunk_input_counts_by_category.get(chunk.category_slug, 0) + len(chunk.product_urls)
+        )
+    product_limit_applied = args.product_limit_per_category > 0 or args.product_limit > 0
+    filter_applied = bool(args.chunk_slug)
+    category_completeness: dict[str, dict[str, object]] = {}
+    for category in categories:
+        category_rows = [row for row in discovered_rows if row.get("category_url") == category.url]
+        discovered_urls = [row.get("product_url", "") for row in category_rows if row.get("product_url")]
+        discovery_errors = [
+            row.get("discovery_error", "")
+            for row in category_rows
+            if row.get("discovery_status") == "failed"
+        ]
+        unique_discovered_count = len(set(discovered_urls))
+        chunk_input_count = chunk_input_counts_by_category.get(category.slug, 0)
+        reasons: list[str] = []
+        if product_limit_applied:
+            reasons.append("product_limit_applied")
+        if filter_applied:
+            reasons.append("chunk_filter_applied")
+        if discovery_errors:
+            reasons.append("category_discovery_failed")
+        if unique_discovered_count == 0:
+            reasons.append("no_discovered_products")
+        if not product_limit_applied and not filter_applied and unique_discovered_count != chunk_input_count:
+            reasons.append(
+                "discovered_vs_chunk_input_mismatch "
+                f"discovered={unique_discovered_count} chunk_input={chunk_input_count}"
+            )
+        category_completeness[category.slug] = {
+            "category_name": category.name,
+            "category_url": category.url,
+            "category_slug": category.slug,
+            "discovered_product_count": len(discovered_urls),
+            "unique_discovered_product_count": unique_discovered_count,
+            "chunk_input_product_count": chunk_input_count,
+            "processed_product_count": 0,
+            "product_limit_per_category": args.product_limit_per_category,
+            "product_limit": args.product_limit,
+            "variant_limit_per_product": args.variant_limit_per_product,
+            "limit_applied": product_limit_applied,
+            "filter_applied": filter_applied,
+            "discovery_complete_scope": "current_discovery_logic",
+            "discovery_complete": not reasons,
+            "pagination_summary": category_pagination_summaries.get(category.slug, {}),
+            "reasons": reasons,
+        }
     write_json(matrix_dir / "chunk_matrix.json", chunk_matrix)
     write_json(matrix_dir / "category_matrix.json", matrix_for_categories(categories))
     write_csv(matrix_dir / "discovered_product_urls.csv", DISCOVERED_COLUMNS, discovered_rows)
@@ -225,6 +275,7 @@ def discover_products(args: argparse.Namespace) -> int:
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "product_limit_per_category": args.product_limit_per_category,
         "product_limit": args.product_limit,
+        "variant_limit_per_product": args.variant_limit_per_product,
         "chunk_size": args.chunk_size,
         "category_slug_filter": args.category_slug,
         "chunk_slug_filter": args.chunk_slug,
@@ -234,6 +285,8 @@ def discover_products(args: argparse.Namespace) -> int:
         ],
         "discovered_product_counts_by_category": discovered_counts_by_category,
         "selected_product_counts_by_category": selected_counts_by_category,
+        "chunk_input_product_counts_by_category": chunk_input_counts_by_category,
+        "category_completeness": category_completeness,
         "zero_product_categories": [
             category.slug for category in categories if discovered_counts_by_category.get(category.slug, 0) == 0
         ],
@@ -286,6 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     products.add_argument("--run-id", default="")
     products.add_argument("--product-limit", type=int, default=0)
     products.add_argument("--product-limit-per-category", type=int, default=3)
+    products.add_argument("--variant-limit-per-product", type=int, default=1)
     products.add_argument("--chunk-size", type=int, default=5)
     products.add_argument("--request-interval", type=float, default=5.0)
     products.add_argument("--retries", type=int, default=2)
