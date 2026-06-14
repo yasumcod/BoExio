@@ -4,17 +4,21 @@ import argparse
 import csv
 import json
 import re
+import subprocess
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from itertools import product as cartesian_product
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 from boexio.phase1_poc import (
     CSV_COLUMNS,
     PARSER_VERSION,
     SCHEMA_VERSION,
+    USER_AGENT,
     collect_output_files,
     commit_sha,
     failed_row,
@@ -30,7 +34,8 @@ from boexio.phase1_poc import (
 )
 
 
-PHASE2_PARSER_VERSION = "0.2.1"
+PHASE2_PARSER_VERSION = "0.2.2"
+VARIANT_OPTIONS_URL = "https://www.boconcept.com/api/product/variant-options/?locale=ja-jp"
 PHASE2_CSV_COLUMNS = [
     *CSV_COLUMNS,
     "category_name",
@@ -51,6 +56,9 @@ CANDIDATE_COLUMNS = [
     "product_url",
     "variant_url",
     "variant_url_key",
+    "super_master_key",
+    "selected_options_json",
+    "selected_option_names_json",
     "selected_leg_id",
     "selected_leg",
     "selected_upholstery_id",
@@ -77,6 +85,7 @@ class OptionValue:
     attribute_label: str
     option_id: str
     name: str
+    previous_requirements: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,9 @@ class VariantCandidate:
     selected_upholstery: str
     candidate_status: str = "pending"
     candidate_error: str = ""
+    selected_options_json: str = ""
+    selected_option_names_json: str = ""
+    super_master_key: str = ""
 
 
 def unescape_next_payload(html: str) -> str:
@@ -157,25 +169,51 @@ def option_values(configuration: dict, attribute_id: str) -> list[OptionValue]:
                         attribute_label=str(option.get("attributeLabel", "")),
                         option_id=option_id,
                         name=name,
+                        previous_requirements=(
+                            value.get("previousRequirements", {})
+                            if isinstance(value.get("previousRequirements", {}), dict)
+                            else {}
+                        ),
                     )
                 )
     return values
 
 
-def replace_option_id(variant_url_key: str, old_value: str, new_value: str) -> str:
-    return variant_url_key.replace(old_value.lower(), new_value.lower()).replace(old_value, new_value.lower())
+def configuration_options(configuration: dict) -> list[tuple[str, str, list[OptionValue]]]:
+    options: list[tuple[str, str, list[OptionValue]]] = []
+    for option in configuration.get("options", []):
+        attribute_id = str(option.get("attributeId", ""))
+        if not attribute_id:
+            continue
+        values = option_values(configuration, attribute_id)
+        if values:
+            options.append((attribute_id, str(option.get("attributeLabel", "")), values))
+    return options
+
+
+def option_token_spans(variant_url_key: str, option_id: str) -> list[tuple[int, int]]:
+    if not option_id:
+        return []
+    pattern = re.compile(
+        rf"(?<=[:_]){re.escape(option_id)}(?=$|-\d+[:_])",
+        flags=re.IGNORECASE,
+    )
+    return [match.span() for match in pattern.finditer(variant_url_key)]
 
 
 def build_variant_url_key(
     base_variant_url_key: str,
-    selected_options: dict[str, str],
+    option_spans: dict[str, tuple[int, int]],
     replacements: dict[str, str],
 ) -> str:
     variant_url_key = base_variant_url_key
-    for attribute_id, new_option_id in replacements.items():
-        current_option_id = selected_options.get(attribute_id, "")
-        if current_option_id:
-            variant_url_key = replace_option_id(variant_url_key, current_option_id, new_option_id)
+    replacements_with_spans = [
+        (option_spans[attribute_id], new_option_id)
+        for attribute_id, new_option_id in replacements.items()
+        if attribute_id in option_spans
+    ]
+    for (start, end), new_option_id in sorted(replacements_with_spans, reverse=True):
+        variant_url_key = f"{variant_url_key[:start]}{new_option_id.lower()}{variant_url_key[end:]}"
     return variant_url_key
 
 
@@ -183,6 +221,37 @@ def variant_url(product_url: str, variant_url_key: str) -> str:
     parts = product_url.rstrip("/").split("/")
     slug = parts[-2] if len(parts) >= 2 else ""
     return urljoin(product_url, f"/ja-jp/p/{slug}/{variant_url_key}/")
+
+
+def requirement_values(value: object) -> set[str]:
+    if isinstance(value, list):
+        return {str(item) for item in value}
+    if isinstance(value, dict):
+        nested = value.get("values", value.get("value", []))
+        return requirement_values(nested)
+    if value is None:
+        return set()
+    return {str(value)}
+
+
+def option_combination_allowed(selected: dict[str, OptionValue]) -> bool:
+    for option in selected.values():
+        for attribute_id, required in option.previous_requirements.items():
+            allowed_values = requirement_values(required)
+            selected_requirement = selected.get(attribute_id)
+            if allowed_values and (
+                selected_requirement is None or selected_requirement.option_id not in allowed_values
+            ):
+                return False
+    return True
+
+
+def selected_option_json(selected: dict[str, OptionValue], field: str) -> str:
+    values = {
+        attribute_id: getattr(option, field)
+        for attribute_id, option in sorted(selected.items())
+    }
+    return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def extract_candidates(product_url: str, html: str) -> list[VariantCandidate]:
@@ -193,41 +262,228 @@ def extract_candidates(product_url: str, html: str) -> list[VariantCandidate]:
     if not base_variant_url_key:
         raise ValueError("variantUrlKey was not found")
 
-    legs = option_values(configuration, "vaMaterialLeg")
-    upholstery_attribute_id = "vaMaterialUpholstery"
-    upholsteries = option_values(configuration, upholstery_attribute_id)
-    if not upholsteries:
-        upholstery_attribute_id = "vaMaterialSeat"
-        upholsteries = option_values(configuration, upholstery_attribute_id)
-    if not legs or not upholsteries:
-        raise ValueError("leg or upholstery/seat options were not found")
+    dimensions: list[tuple[str, list[OptionValue]]] = []
+    option_spans: dict[str, tuple[int, int]] = {}
+    used_option_spans: set[tuple[int, int]] = set()
+    fixed_options: dict[str, OptionValue] = {}
+    for attribute_id, _attribute_label, values in configuration_options(configuration):
+        selected_option_id = str(selected_options.get(attribute_id, ""))
+        if not selected_option_id and len(values) == 1:
+            selected_option_id = values[0].option_id
+        selected_value = next(
+            (value for value in values if value.option_id.lower() == selected_option_id.lower()),
+            None,
+        )
+        if selected_value is None:
+            if len(values) > 1:
+                raise ValueError(f"selected option was not found for configurable attribute: {attribute_id}")
+            fixed_options[attribute_id] = values[0]
+            continue
+
+        available_spans = [
+            span
+            for span in option_token_spans(base_variant_url_key, selected_option_id)
+            if span not in used_option_spans
+        ]
+        if not available_spans:
+            if len(values) > 1:
+                raise ValueError(f"selected option token was not found in variantUrlKey: {attribute_id}")
+            fixed_options[attribute_id] = selected_value
+            continue
+        span = available_spans[0]
+        option_spans[attribute_id] = span
+        used_option_spans.add(span)
+        dimensions.append((attribute_id, values))
 
     candidates: list[VariantCandidate] = []
-    for leg, upholstery in cartesian_product(legs, upholsteries):
+    combinations = cartesian_product(*(values for _attribute_id, values in dimensions))
+    if not dimensions:
+        combinations = [()]
+    seen_variant_keys: set[str] = set()
+    for combination in combinations:
+        selected = dict(fixed_options)
+        selected.update(
+            {
+                attribute_id: option
+                for (attribute_id, _values), option in zip(dimensions, combination)
+            }
+        )
+        if not option_combination_allowed(selected):
+            continue
+        replacements = {
+            attribute_id: option.option_id
+            for attribute_id, option in selected.items()
+            if attribute_id in option_spans
+        }
         variant_url_key = build_variant_url_key(
             base_variant_url_key,
-            selected_options,
-            {
-                "vaMaterialLeg": leg.option_id,
-                upholstery_attribute_id: upholstery.option_id,
-            },
+            option_spans,
+            replacements,
         )
+        if variant_url_key in seen_variant_keys:
+            continue
+        seen_variant_keys.add(variant_url_key)
         url = variant_url(product_url, variant_url_key)
         valid, error_code = validate_discovered_product_url(url)
+        leg = selected.get("vaMaterialLeg") or selected.get("vaMaterialLegStyle")
+        upholstery = selected.get("vaMaterialUpholstery") or selected.get("vaMaterialSeat")
         candidates.append(
             VariantCandidate(
                 product_url=product_url,
                 variant_url=url,
                 variant_url_key=variant_url_key,
-                selected_leg_id=leg.option_id,
-                selected_leg=leg.name,
-                selected_upholstery_id=upholstery.option_id,
-                selected_upholstery=upholstery.name,
+                selected_leg_id=leg.option_id if leg else "",
+                selected_leg=leg.name if leg else "",
+                selected_upholstery_id=upholstery.option_id if upholstery else "",
+                selected_upholstery=upholstery.name if upholstery else "",
                 candidate_status="pending" if valid else "invalid",
                 candidate_error=error_code,
+                selected_options_json=selected_option_json(selected, "option_id"),
+                selected_option_names_json=selected_option_json(selected, "name"),
+                super_master_key=str(product.get("superMasterKey", "")),
             )
         )
+    if not candidates:
+        raise ValueError("no valid option combinations were generated")
     return candidates
+
+
+def resolve_candidate(candidate: VariantCandidate, timeout: int) -> tuple[VariantCandidate | None, dict]:
+    if not candidate.super_master_key:
+        raise ValueError("superMasterKey was not found")
+    selections = json.loads(candidate.selected_options_json or "{}")
+    request_body = json.dumps(
+        {
+            "superMasterKey": candidate.super_master_key,
+            "selections": selections,
+        }
+    )
+    request = Request(
+        VARIANT_OPTIONS_URL,
+        data=request_body.encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"HTTP_{exc.code}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("TIMEOUT_READ: request timed out") from exc
+    except URLError as exc:
+        reason = str(exc.reason)
+        if "unknown url type: https" not in reason and "CERTIFICATE_VERIFY_FAILED" not in reason:
+            code = "TIMEOUT_CONNECT" if "timed out" in reason.lower() else "UNKNOWN"
+            raise RuntimeError(f"{code}: {reason}") from exc
+        result = subprocess.run(
+            [
+                "curl",
+                "-sS",
+                "-L",
+                "--max-time",
+                str(timeout),
+                "-A",
+                USER_AGENT,
+                "-H",
+                "Content-Type: application/json",
+                "--data",
+                request_body,
+                VARIANT_OPTIONS_URL,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 5,
+        )
+        if result.returncode != 0:
+            code = "TIMEOUT_READ" if "timed out" in result.stderr.lower() else "UNKNOWN"
+            raise RuntimeError(f"{code}: curl failed: {result.stderr.strip()}")
+        payload = json.loads(result.stdout)
+    if payload.get("status") != "ok":
+        response_status = payload.get("res", {}).get("status")
+        if response_status == 404:
+            return None, payload
+        raise ValueError(f"variant option resolution failed: {payload.get('message', 'unknown error')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("variant option response did not contain product data")
+    variant_url_key = str(data.get("variantUrlKey", ""))
+    if not variant_url_key:
+        raise ValueError("resolved variantUrlKey was not found")
+    return (
+        replace(
+            candidate,
+            variant_url=variant_url(candidate.product_url, variant_url_key),
+            variant_url_key=variant_url_key,
+            candidate_status="pending",
+            candidate_error="",
+        ),
+        data,
+    )
+
+
+def resolved_variant_row(
+    candidate: VariantCandidate,
+    payload: dict,
+    raw_ref: str,
+    run_id: str,
+    checked_at: str,
+) -> dict[str, str]:
+    attributes = payload.get("attributes", {})
+    if not isinstance(attributes, dict):
+        attributes = {}
+    price = payload.get("price", {})
+    if not isinstance(price, dict):
+        price = {}
+    assets = payload.get("assets", [])
+    if not isinstance(assets, list):
+        assets = []
+    image_url = next(
+        (
+            str(asset.get("source", ""))
+            for asset in assets
+            if isinstance(asset, dict) and asset.get("source")
+        ),
+        "",
+    )
+    formatted_price = str(price.get("formattedPrice", ""))
+    variant_key = str(payload.get("variantKey", ""))
+    return {
+        "run_id": run_id,
+        "source_url": candidate.variant_url,
+        "source_checked_at": checked_at,
+        "scrape_status": "success",
+        "scrape_error_code": "",
+        "scrape_error_message": "",
+        "brand": "BoConcept",
+        "series": str(payload.get("name", "")),
+        "product_name": str(payload.get("description", "")) or str(payload.get("name", "")),
+        "base_item_number": str(payload.get("productMasterKey", "")),
+        "variant_id": str(payload.get("variantUrlKey", "")),
+        "sku": variant_key,
+        "item_number": variant_key,
+        "selected_size": "",
+        "selected_upholstery": candidate.selected_upholstery,
+        "selected_leg": candidate.selected_leg,
+        "width_cm": str(attributes.get("width", "")),
+        "depth_cm": str(attributes.get("depth", "")),
+        "height_cm": str(attributes.get("height", "")),
+        "weight_kg": str(attributes.get("weight", "")),
+        "material": str(attributes.get("productSpecification", "")),
+        "list_price": formatted_price,
+        "display_price": formatted_price,
+        "canonical_price": formatted_price,
+        "price_from": "variant_options_api",
+        "currency": str(price.get("currency", "")),
+        "tax_type": "tax_included" if formatted_price else "",
+        "image_url": image_url,
+        "pdf_url": "",
+        "raw_data_ref": raw_ref,
+    }
 
 
 def write_candidates_csv(path: Path, run_id: str, candidates: list[VariantCandidate]) -> None:
@@ -241,6 +497,9 @@ def write_candidates_csv(path: Path, run_id: str, candidates: list[VariantCandid
                     "product_url": candidate.product_url,
                     "variant_url": candidate.variant_url,
                     "variant_url_key": candidate.variant_url_key,
+                    "super_master_key": candidate.super_master_key,
+                    "selected_options_json": candidate.selected_options_json,
+                    "selected_option_names_json": candidate.selected_option_names_json,
                     "selected_leg_id": candidate.selected_leg_id,
                     "selected_leg": candidate.selected_leg,
                     "selected_upholstery_id": candidate.selected_upholstery_id,

@@ -366,7 +366,10 @@ def parse_product(product: FetchResult, raw_ref: str, run_id: str) -> dict[str, 
     variant_url_key = escaped_json_value(product.html, "variantUrlKey")
     sku = escaped_json_value(product.html, "variantKey")
     json_price = escaped_json_number(product.html, "currentPrice")
-    selected_leg_id = selected_option_id(product.html, "vaMaterialLeg")
+    selected_leg_id = first_selected_option_id(
+        product.html,
+        ("vaMaterialLeg", "vaMaterialLegStyle"),
+    )
     selected_upholstery_id = first_selected_option_id(
         product.html,
         ("vaMaterialUpholstery", "vaMaterialSeat"),

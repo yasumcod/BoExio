@@ -1,10 +1,19 @@
 import csv
+import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from boexio.phase1_poc import FetchResult, parse_product, request_safe_url
-from boexio.phase2_variants import enrich_row, generate_variant_key, normalize_attribute
-from boexio.phase2_variants import extract_candidates
+from boexio.phase2_variants import (
+    VariantCandidate,
+    enrich_row,
+    extract_candidates,
+    generate_variant_key,
+    normalize_attribute,
+    resolve_candidate,
+    resolved_variant_row,
+)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -116,6 +125,195 @@ class Phase2VariantTests(unittest.TestCase):
         self.assertEqual("ファブリック 自然", candidates[0].selected_upholstery)
         self.assertEqual("pending", candidates[0].candidate_status)
         self.assertIn("4060001-9_0702s-14_2065", [candidate.variant_url_key for candidate in candidates])
+        self.assertEqual(
+            {"vaMaterialLeg": "0708s", "vaMaterialUpholstery": "2063"},
+            json.loads(candidates[0].selected_options_json),
+        )
+
+    def test_extract_candidates_supports_all_configuration_attributes(self):
+        html = """
+        <script>
+        {\\"product\\":{\\"superMasterKey\\":\\"4352503\\",
+        \\"variantUrlKey\\":\\"4352503-10:435_sofalegs_2-14:2250-21:4\\",
+        \\"selectedOptions\\":{\\"vaMaterialLegStyle\\":\\"435_Sofalegs_2\\",
+        \\"vaMaterialUpholstery\\":\\"2250\\",\\"vaSofaDirection\\":\\"4\\"}},
+        \\"configuration\\":{\\"options\\":[
+        {\\"attributeId\\":\\"vaMaterialLegStyle\\",\\"attributeLabel\\":\\"脚のスタイル\\",
+        \\"values\\":[{\\"id\\":\\"435_Sofalegs_2\\",\\"name\\":\\"脚\\"}]},
+        {\\"attributeId\\":\\"vaSofaDirection\\",\\"attributeLabel\\":\\"向き\\",
+        \\"values\\":[{\\"id\\":\\"5\\",\\"name\\":\\"右\\"},{\\"id\\":\\"4\\",\\"name\\":\\"左\\"}]},
+        {\\"attributeId\\":\\"vaMaterialUpholstery\\",\\"attributeLabel\\":\\"張地\\",
+        \\"values\\":[{\\"id\\":\\"2250\\",\\"name\\":\\"Napoli\\"},{\\"id\\":\\"3252\\",\\"name\\":\\"Avellino\\"}]}
+        ]}}
+        </script>
+        """
+
+        candidates = extract_candidates(
+            "https://www.boconcept.com/ja-jp/p/amsterdam/4352503-10:435_sofalegs_2-14:2250-21:4/",
+            html,
+        )
+
+        self.assertEqual(4, len(candidates))
+        self.assertIn(
+            "4352503-10:435_sofalegs_2-14:3252-21:5",
+            [candidate.variant_url_key for candidate in candidates],
+        )
+        self.assertTrue(all(key.startswith("4352503-") for key in (c.variant_url_key for c in candidates)))
+        self.assertEqual("脚", candidates[0].selected_leg)
+        self.assertIn("vaSofaDirection", json.loads(candidates[0].selected_options_json))
+
+    def test_extract_candidates_applies_previous_requirements(self):
+        html = """
+        <script>
+        {\\"product\\":{\\"superMasterKey\\":\\"1\\",\\"variantUrlKey\\":\\"1-1:a-2:x\\",
+        \\"selectedOptions\\":{\\"first\\":\\"a\\",\\"second\\":\\"x\\"}},
+        \\"configuration\\":{\\"options\\":[
+        {\\"attributeId\\":\\"first\\",\\"values\\":[
+        {\\"id\\":\\"a\\",\\"name\\":\\"A\\"},{\\"id\\":\\"b\\",\\"name\\":\\"B\\"}]},
+        {\\"attributeId\\":\\"second\\",\\"values\\":[
+        {\\"id\\":\\"x\\",\\"name\\":\\"X\\",\\"previousRequirements\\":{\\"first\\":[\\"a\\"]}},
+        {\\"id\\":\\"y\\",\\"name\\":\\"Y\\",\\"previousRequirements\\":{\\"first\\":[\\"b\\"]}}]}
+        ]}}
+        </script>
+        """
+
+        candidates = extract_candidates("https://www.boconcept.com/ja-jp/p/example/1-1:a-2:x/", html)
+
+        self.assertEqual(["1-1:a-2:x", "1-1:b-2:y"], [candidate.variant_url_key for candidate in candidates])
+
+    def test_extract_candidates_maps_repeated_option_ids_by_attribute_order(self):
+        html = """
+        <script>
+        {\\"product\\":{\\"superMasterKey\\":\\"3707250\\",
+        \\"variantUrlKey\\":\\"3707250-2:403-6:0702-9:0702\\",
+        \\"selectedOptions\\":{\\"size\\":\\"403\\",\\"cabinet\\":\\"0702\\",\\"leg\\":\\"0702\\"}},
+        \\"configuration\\":{\\"options\\":[
+        {\\"attributeId\\":\\"size\\",\\"values\\":[{\\"id\\":\\"403\\",\\"name\\":\\"Small\\"}]},
+        {\\"attributeId\\":\\"cabinet\\",\\"values\\":[
+        {\\"id\\":\\"0702\\",\\"name\\":\\"Dark\\"},{\\"id\\":\\"0708\\",\\"name\\":\\"Natural\\"}]},
+        {\\"attributeId\\":\\"leg\\",\\"values\\":[
+        {\\"id\\":\\"0702\\",\\"name\\":\\"Dark\\",\\"previousRequirements\\":{\\"cabinet\\":[\\"0702\\"]}},
+        {\\"id\\":\\"0708\\",\\"name\\":\\"Natural\\",\\"previousRequirements\\":{\\"cabinet\\":[\\"0708\\"]}}]}
+        ]}}
+        </script>
+        """
+
+        candidates = extract_candidates(
+            "https://www.boconcept.com/ja-jp/p/axo-series/3707250-2:403-6:0702-9:0702/",
+            html,
+        )
+
+        self.assertEqual(
+            ["3707250-2:403-6:0702-9:0702", "3707250-2:403-6:0708-9:0708"],
+            [candidate.variant_url_key for candidate in candidates],
+        )
+
+    def test_resolve_candidate_uses_api_variant_url_key(self):
+        candidate = VariantCandidate(
+            product_url="https://www.boconcept.com/ja-jp/p/amsterdam/current/",
+            variant_url="https://www.boconcept.com/ja-jp/p/amsterdam/guessed/",
+            variant_url_key="guessed",
+            selected_leg_id="leg",
+            selected_leg="Leg",
+            selected_upholstery_id="2063",
+            selected_upholstery="Fabric",
+            selected_options_json='{"direction":"5","upholstery":"2063"}',
+            super_master_key="SM43550006",
+        )
+        response_payload = {
+            "status": "ok",
+            "data": {
+                "variantUrlKey": "4352502-10:leg-14:2063-21:5",
+                "variantKey": "sku",
+            },
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(response_payload).encode("utf-8")
+
+        with patch("boexio.phase2_variants.urlopen", return_value=Response()):
+            resolved, payload = resolve_candidate(candidate, timeout=10)
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual("4352502-10:leg-14:2063-21:5", resolved.variant_url_key)
+        self.assertTrue(resolved.variant_url.endswith("/4352502-10:leg-14:2063-21:5/"))
+        self.assertEqual("sku", payload["variantKey"])
+
+    def test_resolve_candidate_treats_api_404_as_unsupported(self):
+        candidate = VariantCandidate(
+            product_url="https://www.boconcept.com/ja-jp/p/example/current/",
+            variant_url="https://www.boconcept.com/ja-jp/p/example/guessed/",
+            variant_url_key="guessed",
+            selected_leg_id="",
+            selected_leg="",
+            selected_upholstery_id="",
+            selected_upholstery="",
+            selected_options_json='{"option":"invalid"}',
+            super_master_key="SM1",
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"status": "error", "res": {"status": 404}}).encode("utf-8")
+
+        with patch("boexio.phase2_variants.urlopen", return_value=Response()):
+            resolved, _payload = resolve_candidate(candidate, timeout=10)
+
+        self.assertIsNone(resolved)
+
+    def test_resolved_variant_row_maps_api_product_data(self):
+        candidate = VariantCandidate(
+            product_url="product",
+            variant_url="https://www.boconcept.com/ja-jp/p/amsterdam/resolved/",
+            variant_url_key="resolved",
+            selected_leg_id="leg",
+            selected_leg="Dark leg",
+            selected_upholstery_id="2063",
+            selected_upholstery="Light fabric",
+        )
+
+        row = resolved_variant_row(
+            candidate,
+            {
+                "name": "Amsterdam",
+                "description": "Amsterdam sofa",
+                "productMasterKey": "master",
+                "variantUrlKey": "resolved",
+                "variantKey": "sku",
+                "price": {"formattedPrice": "¥ 100", "currency": "JPY"},
+                "attributes": {
+                    "width": "100 cm",
+                    "depth": "80 cm",
+                    "height": "70 cm",
+                    "weight": "20 kg",
+                    "productSpecification": "material",
+                },
+                "assets": [{"source": "https://images.example.test/product.jpg"}],
+            },
+            "raw/variant.json",
+            "run",
+            "2026-06-14T00:00:00+00:00",
+        )
+
+        self.assertEqual("Amsterdam sofa", row["product_name"])
+        self.assertEqual("resolved", row["variant_id"])
+        self.assertEqual("sku", row["sku"])
+        self.assertEqual("¥ 100", row["canonical_price"])
+        self.assertEqual("variant_options_api", row["price_from"])
 
 
 if __name__ == "__main__":

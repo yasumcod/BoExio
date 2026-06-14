@@ -43,6 +43,9 @@
 
 - `phase3_run_metadata.json` の `category_completeness` で、カテゴリ別に `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` を確認する。
 - `product_variant_completeness` で、商品別に `variant_candidate_count`、`variant_fetch_attempt_count`、`variant_success_count`、`variant_failure_count`、`variant_skipped_count` を確認する。
+- `candidate_extraction_success=false` または `candidate_extraction_error` がある商品は、候補数が少なく見えても全件取得完了とは扱わない。
+- `variant_unsupported_count` は、全設定属性の組み合わせを公式 `variant-options` API で解決した結果、商品として存在しない組み合わせの件数を示す。
+- `variant_candidates.csv` の `selected_options_json` と `selected_option_names_json` で、脚・張地以外のサイズ、向き、素材、機能なども候補へ含まれていることを確認する。
 - full run では `variant_candidate_count = variant_fetch_attempt_count + variant_skipped_count`、`variant_fetch_attempt_count = variant_success_count + variant_failure_count` が崩れていないか確認する。
 - チェア、ソファなど張地が多いカテゴリで、後半の商品または後半 variant が欠落していないか。
 - 欠落がある場合、workflow / job timeout、retry 増加、chunk artifact 欠落、候補生成漏れのどれに近いか。

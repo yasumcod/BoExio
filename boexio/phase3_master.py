@@ -7,7 +7,7 @@ import json
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
@@ -37,13 +37,15 @@ from boexio.phase2_variants import (
     enrich_rows,
     error_rows,
     extract_candidates,
+    resolve_candidate,
+    resolved_variant_row,
     write_candidates_csv,
     write_errors_csv,
     write_phase2_csv,
 )
 
 
-PHASE3_PARSER_VERSION = "0.3.1"
+PHASE3_PARSER_VERSION = "0.3.2"
 RETRYABLE_ERROR_CODES = {"HTTP_429", "TIMEOUT_CONNECT", "TIMEOUT_READ", "RATE_LIMITED"}
 STOP_ERROR_CODES = {"HTTP_403"}
 MAX_FAILURE_RATE = 0.30
@@ -253,13 +255,37 @@ def fetch_with_control(url: str, timeout: int, retries: int, limiter: RateLimite
     raise last_error
 
 
+def resolve_candidate_with_control(
+    candidate: VariantCandidate,
+    timeout: int,
+    retries: int,
+    limiter: RateLimiter,
+) -> tuple[VariantCandidate | None, dict]:
+    attempts = retries + 1
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        limiter.wait()
+        try:
+            result = resolve_candidate(candidate, timeout)
+            limiter.mark()
+            return result
+        except Exception as exc:
+            limiter.mark()
+            code, _detail = split_error(exc)
+            last_error = exc
+            if attempt >= attempts or not is_retryable_error(code):
+                break
+    assert last_error is not None
+    raise last_error
+
+
 def safe_raw_name(prefix: str, index: int, url: str) -> str:
     tail = url.rstrip("/").split("/")[-1] or "page"
     tail = re.sub(r"[^A-Za-z0-9._-]+", "_", tail)[:120]
     return f"{prefix}_{index:03d}_{tail}.html"
 
 
-def candidate_fallback(product_url: str) -> VariantCandidate:
+def candidate_fallback(product_url: str, error: str) -> VariantCandidate:
     return VariantCandidate(
         product_url=product_url,
         variant_url=product_url,
@@ -268,8 +294,8 @@ def candidate_fallback(product_url: str) -> VariantCandidate:
         selected_leg="",
         selected_upholstery_id="",
         selected_upholstery="",
-        candidate_status="pending",
-        candidate_error="",
+        candidate_status="extraction_failed",
+        candidate_error=error,
     )
 
 
@@ -325,11 +351,14 @@ def product_variant_completeness_entry(
     variant_candidate_count: int = 0,
     unique_variant_candidate_count: int = 0,
     variant_invalid_candidate_count: int = 0,
+    variant_unsupported_count: int = 0,
     variant_fetch_attempt_count: int = 0,
     variant_success_count: int = 0,
     variant_failure_count: int = 0,
     variant_skipped_count: int = 0,
     variant_limit_per_product: int = 0,
+    candidate_extraction_success: bool = True,
+    candidate_extraction_error: str = "",
 ) -> dict[str, object]:
     limit_applied = variant_limit_per_product > 0
     reasons: list[str] = []
@@ -342,6 +371,8 @@ def product_variant_completeness_entry(
             reasons.append("product_fetch_incomplete")
     if variant_invalid_candidate_count:
         reasons.append(f"variant_invalid_candidate_count={variant_invalid_candidate_count}")
+    if not candidate_extraction_success:
+        reasons.append(f"candidate_extraction_failed={candidate_extraction_error}")
     if limit_applied and variant_skipped_count:
         reasons.append(f"variant_limit_applied skipped={variant_skipped_count}")
 
@@ -364,6 +395,7 @@ def product_variant_completeness_entry(
 
     fetch_attempt_complete = (
         not limit_applied
+        and candidate_extraction_success
         and product_fetch_success_count > 0
         and candidate_attempt_equation_ok
         and fetch_result_equation_ok
@@ -392,11 +424,14 @@ def product_variant_completeness_entry(
         "variant_candidate_count": variant_candidate_count,
         "unique_variant_candidate_count": unique_variant_candidate_count,
         "variant_invalid_candidate_count": variant_invalid_candidate_count,
+        "variant_unsupported_count": variant_unsupported_count,
         "variant_fetch_attempt_count": variant_fetch_attempt_count,
         "variant_success_count": variant_success_count,
         "variant_failure_count": variant_failure_count,
         "variant_skipped_count": variant_skipped_count,
         "variant_limit_per_product": variant_limit_per_product,
+        "candidate_extraction_success": candidate_extraction_success,
+        "candidate_extraction_error": candidate_extraction_error,
         "limit_applied": limit_applied,
         "fetch_attempt_complete": fetch_attempt_complete,
         "comparison_complete": comparison_complete,
@@ -417,10 +452,13 @@ def initial_product_variant_stats(product_url: str, category: CategoryTarget) ->
         "variant_candidate_count": 0,
         "unique_variant_candidate_count": 0,
         "variant_invalid_candidate_count": 0,
+        "variant_unsupported_count": 0,
         "variant_fetch_attempt_count": 0,
         "variant_success_count": 0,
         "variant_failure_count": 0,
         "variant_skipped_count": 0,
+        "candidate_extraction_success": True,
+        "candidate_extraction_error": "",
     }
 
 
@@ -443,11 +481,14 @@ def finalize_product_variant_completeness(
             variant_candidate_count=int(stats.get("variant_candidate_count") or 0),
             unique_variant_candidate_count=int(stats.get("unique_variant_candidate_count") or 0),
             variant_invalid_candidate_count=int(stats.get("variant_invalid_candidate_count") or 0),
+            variant_unsupported_count=int(stats.get("variant_unsupported_count") or 0),
             variant_fetch_attempt_count=int(stats.get("variant_fetch_attempt_count") or 0),
             variant_success_count=int(stats.get("variant_success_count") or 0),
             variant_failure_count=int(stats.get("variant_failure_count") or 0),
             variant_skipped_count=int(stats.get("variant_skipped_count") or 0),
             variant_limit_per_product=variant_limit_per_product,
+            candidate_extraction_success=bool(stats.get("candidate_extraction_success", True)),
+            candidate_extraction_error=str(stats.get("candidate_extraction_error", "")),
         )
         completeness[product_url] = entry
         reasons = [str(reason) for reason in entry.get("reasons", [])]
@@ -754,52 +795,128 @@ def run(args: argparse.Namespace) -> int:
                 (raw_dir / raw_name).write_text(product_page.html, encoding="utf-8")
                 product_attribute_summaries[product_url] = configuration_attribute_summary(product_page.html)
                 try:
-                    product_candidates = extract_candidates(product_url, product_page.html)
+                    provisional_candidates = extract_candidates(product_url, product_page.html)
                 except Exception as exc:
-                    product_candidates = [candidate_fallback(product_url)]
                     code, detail = split_error(exc)
+                    product_stats["candidate_extraction_success"] = False
+                    product_stats["candidate_extraction_error"] = f"{code}: {detail}"
+                    provisional_candidates = [candidate_fallback(product_url, f"{code}: {detail}")]
                     logs.append(
                         f"candidate_extraction_fallback_url={product_url} code={code} detail={detail}"
                     )
-                product_candidate_counts[product_url] = len(product_candidates)
-                candidates.extend(product_candidates)
-                pending_candidates = [
-                    candidate for candidate in product_candidates if candidate.candidate_status == "pending"
-                ]
-                product_stats["variant_candidate_count"] = len(product_candidates)
-                product_stats["unique_variant_candidate_count"] = len(
-                    {candidate.variant_url for candidate in product_candidates if candidate.variant_url}
-                )
-                product_stats["variant_invalid_candidate_count"] = len(product_candidates) - len(pending_candidates)
 
-                selected_candidates = select_variant_candidates(product_candidates, args.variant_limit_per_product)
-                product_stats["variant_skipped_count"] = (
-                    max(len(pending_candidates) - len(selected_candidates), 0)
-                    if args.variant_limit_per_product > 0
-                    else 0
-                )
-                for candidate_index, candidate in enumerate(selected_candidates, start=1):
-                    product_stats["variant_fetch_attempt_count"] = int(product_stats["variant_fetch_attempt_count"]) + 1
+                resolved_entries: list[tuple[VariantCandidate, dict | None, str]] = []
+                unsupported_candidates: list[VariantCandidate] = []
+                for provisional_candidate in provisional_candidates:
+                    if provisional_candidate.candidate_status != "pending":
+                        resolved_entries.append(
+                            (provisional_candidate, None, provisional_candidate.candidate_error)
+                        )
+                        continue
+                    if (
+                        args.variant_limit_per_product > 0
+                        and len(resolved_entries) >= args.variant_limit_per_product
+                    ):
+                        break
                     try:
-                        variant_page = fetch_with_control(
-                            candidate.variant_url,
+                        resolved_candidate, resolved_payload = resolve_candidate_with_control(
+                            provisional_candidate,
                             args.timeout,
                             args.retries,
                             limiter,
                         )
+                        if resolved_candidate is None:
+                            unsupported_candidates.append(
+                                dataclass_replace(
+                                    provisional_candidate,
+                                    candidate_status="unsupported",
+                                    candidate_error="variant_options_api returned 404",
+                                )
+                            )
+                            continue
+                        resolved_entries.append((resolved_candidate, resolved_payload, ""))
+                    except Exception as exc:
+                        code, detail = split_error(exc)
+                        resolution_error = f"{code}: {detail}"
+                        resolved_entries.append(
+                            (
+                                dataclass_replace(
+                                    provisional_candidate,
+                                    candidate_status="resolution_failed",
+                                    candidate_error=resolution_error,
+                                ),
+                                None,
+                                resolution_error,
+                            )
+                        )
+                product_candidates = [entry[0] for entry in resolved_entries]
+                if not product_candidates and product_stats.get("candidate_extraction_success"):
+                    product_stats["candidate_extraction_success"] = False
+                    product_stats["candidate_extraction_error"] = "no_resolved_variants"
+                candidates.extend(product_candidates)
+                candidates.extend(unsupported_candidates)
+                product_candidate_counts[product_url] = len(product_candidates)
+                product_stats["variant_candidate_count"] = len(product_candidates)
+                product_stats["unique_variant_candidate_count"] = len(
+                    {candidate.variant_url for candidate in product_candidates if candidate.variant_url}
+                )
+                product_stats["variant_invalid_candidate_count"] = sum(
+                    1 for candidate in product_candidates if candidate.candidate_status != "pending"
+                )
+                product_stats["variant_unsupported_count"] = len(unsupported_candidates)
+
+                selected_entries = (
+                    resolved_entries
+                    if args.variant_limit_per_product <= 0
+                    else resolved_entries[: args.variant_limit_per_product]
+                )
+                product_stats["variant_skipped_count"] = (
+                    max(len(resolved_entries) - len(selected_entries), 0)
+                    if args.variant_limit_per_product > 0
+                    else 0
+                )
+                for candidate_index, (candidate, resolved_payload, resolution_error) in enumerate(
+                    selected_entries,
+                    start=1,
+                ):
+                    product_stats["variant_fetch_attempt_count"] = int(product_stats["variant_fetch_attempt_count"]) + 1
+                    if resolved_payload is None:
+                        rows.append(
+                            add_category_metadata(
+                                failed_row(
+                                    run_id,
+                                    candidate.variant_url,
+                                    "VARIANT_RESOLUTION_FAILED",
+                                    resolution_error,
+                                ),
+                                product_category,
+                            )
+                        )
+                        product_stats["variant_failure_count"] = int(product_stats["variant_failure_count"]) + 1
+                        continue
+                    try:
                         raw_name = safe_raw_name(
                             f"variant_{product_index:03d}",
                             candidate_index,
                             candidate.variant_url,
-                        )
+                        ).removesuffix(".html") + ".json"
                         raw_path = raw_dir / raw_name
-                        raw_path.write_text(variant_page.html, encoding="utf-8")
-                        parsed_row = parse_product(variant_page, f"raw/{raw_name}", run_id)
+                        raw_path.write_text(
+                            json.dumps(resolved_payload, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                        parsed_row = resolved_variant_row(
+                            candidate,
+                            resolved_payload,
+                            f"raw/{raw_name}",
+                            run_id,
+                            datetime.now(timezone.utc).isoformat(),
+                        )
                         if parsed_row.get("product_name") and not product_stats.get("product_name"):
                             product_stats["product_name"] = parsed_row["product_name"]
                         rows.append(add_category_metadata(parsed_row, product_category))
                         product_stats["variant_success_count"] = int(product_stats["variant_success_count"]) + 1
-                        logs.append(f"fetched_variant_url={candidate.variant_url}")
+                        logs.append(f"resolved_variant_url={candidate.variant_url}")
                     except StopRunError:
                         raise
                     except Exception as exc:
@@ -968,7 +1085,10 @@ def run(args: argparse.Namespace) -> int:
         "category_completeness": category_completeness,
         "product_variant_completeness": product_variant_completeness,
         "category_pagination_summaries": category_pagination_summaries,
-        "variant_candidate_count": len(candidates),
+        "variant_candidate_count": sum(
+            int(entry.get("variant_candidate_count") or 0)
+            for entry in product_variant_completeness.values()
+        ),
         "variant_fetch_attempt_count": sum(
             int(entry.get("variant_fetch_attempt_count") or 0)
             for entry in product_variant_completeness.values()
@@ -1000,6 +1120,9 @@ def run(args: argparse.Namespace) -> int:
             "HTTP_429, HTTP_5xx, TIMEOUT_CONNECT, TIMEOUT_READ, and RATE_LIMITED are retried per URL.",
             "HTTP_403 or captcha/challenge detection stops the run immediately.",
             "products_current.csv and the dated products snapshot have the Phase 2 enriched schema.",
+            "Variant combinations are enumerated from all configuration options and resolved through the site's variant-options API.",
+            "Unsupported option combinations are excluded only when the variant-options API returns its 404 result.",
+            "variant_candidates.csv records generic selected option IDs and names as JSON.",
             "variant_limit_per_product=0 means all pending variant candidates for each product are fetched.",
         ],
     }

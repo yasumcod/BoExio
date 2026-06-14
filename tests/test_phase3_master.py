@@ -185,6 +185,28 @@ class Phase3MasterTests(unittest.TestCase):
         self.assertEqual(3, entry["variant_skipped_count"])
         self.assertFalse(entry["fetch_attempt_complete"])
 
+    def test_candidate_extraction_failure_is_not_complete(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("ソファ", "https://www.boconcept.com/ja-jp/shop/sofa/", "sofa"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=1,
+            unique_variant_candidate_count=1,
+            variant_invalid_candidate_count=1,
+            variant_fetch_attempt_count=0,
+            variant_success_count=0,
+            variant_failure_count=0,
+            variant_skipped_count=0,
+            variant_limit_per_product=0,
+            candidate_extraction_success=False,
+            candidate_extraction_error="SCHEMA_MISMATCH",
+        )
+
+        self.assertFalse(entry["fetch_attempt_complete"])
+        self.assertFalse(entry["comparison_complete"])
+        self.assertIn("candidate_extraction_failed=SCHEMA_MISMATCH", entry["reasons"])
+
     def test_add_category_metadata_preserves_source_row(self):
         row = {"source_url": "https://example.test/product"}
         enriched = add_category_metadata(
