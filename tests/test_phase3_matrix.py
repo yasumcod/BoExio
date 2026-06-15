@@ -3,7 +3,17 @@ import unittest
 from pathlib import Path
 
 from boexio.phase3_master import CategoryTarget
-from boexio.phase3_matrix import chunk_product_urls, limited_product_urls, matrix_for_categories, matrix_for_chunks
+from boexio.phase3_matrix import (
+    ProductVariantPlan,
+    chunk_product_urls,
+    limited_product_urls,
+    matrix_for_categories,
+    matrix_for_chunks,
+    matrix_for_variant_chunks,
+    pack_variant_plans,
+    shard_product_variants,
+    variant_request_budget,
+)
 
 
 class Phase3MatrixTests(unittest.TestCase):
@@ -51,6 +61,38 @@ class Phase3MatrixTests(unittest.TestCase):
         self.assertEqual("chair-001", matrix["include"][0]["chunk_slug"])
         self.assertEqual("matrix/chair-001-product-urls.txt", matrix["include"][0]["product_urls_file"])
         self.assertEqual(1, matrix["include"][0]["chunk_product_count"])
+
+    def test_large_product_is_split_by_request_budget(self):
+        budget = variant_request_budget(request_interval=5, target_minutes=180)
+
+        plans = shard_product_variants("product", 5016, budget)
+
+        self.assertEqual(2160, budget)
+        self.assertEqual([0, 2160, 4320], [plan.variant_offset for plan in plans])
+        self.assertEqual([2160, 2160, 696], [plan.variant_limit for plan in plans])
+
+    def test_pack_variant_plans_keeps_chunks_within_budget(self):
+        category = CategoryTarget("ベッド", "https://example.test/bed", "bed")
+        plans = [
+            ProductVariantPlan("p1", 0, 1000, 1000),
+            ProductVariantPlan("p2", 0, 900, 900),
+            ProductVariantPlan("p3", 0, 500, 500),
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            chunks = pack_variant_plans(
+                category,
+                plans,
+                chunk_size=5,
+                max_requests_per_chunk=2160,
+                matrix_dir=Path(directory),
+            )
+
+            self.assertEqual([1900, 500], [chunk.estimated_request_count for chunk in chunks])
+            self.assertTrue((Path(directory) / "bed-001-product-plan.json").exists())
+            matrix = matrix_for_variant_chunks(chunks, request_interval=5)
+            self.assertEqual(["p1", "p2"], matrix["include"][0]["product_urls"])
+            self.assertEqual(9500, matrix["include"][0]["estimated_minimum_seconds"])
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from boexio.phase2_variants import CANDIDATE_COLUMNS, ERROR_COLUMNS, PHASE2_CSV_COLUMNS
 from boexio.phase3_matrix import DISCOVERED_COLUMNS
-from boexio.phase3_merge import merge_chunks
+from boexio.phase3_merge import merge_chunks, merge_product_variant_completeness
 
 
 CHAIR_URL = "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/"
@@ -119,6 +119,98 @@ def chunk_metadata(
 
 
 class Phase3MergeTests(unittest.TestCase):
+    def test_merge_aggregates_variant_shards_for_same_product(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chunks_dir = root / "chunks"
+            matrix_path = root / "matrix.json"
+            discovery_metadata_path = root / "discovery_metadata.json"
+            out = root / "data"
+            product_url = "https://www.boconcept.com/ja-jp/p/chair/1/"
+            matrix_path.write_text(
+                json.dumps(
+                    {
+                        "include": [
+                            {
+                                "category_name": "チェア",
+                                "category_url": CHAIR_URL,
+                                "category_slug": "chair",
+                                "chunk_slug": "chair-001",
+                                "chunk_product_count": 1,
+                                "product_urls": [product_url],
+                            },
+                            {
+                                "category_name": "チェア",
+                                "category_url": CHAIR_URL,
+                                "category_slug": "chair",
+                                "chunk_slug": "chair-002",
+                                "chunk_product_count": 1,
+                                "product_urls": [product_url],
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            discovery_metadata_path.write_text(json.dumps(full_discovery_metadata()), encoding="utf-8")
+
+            for index in (1, 2):
+                slug = f"chair-{index:03d}"
+                chunk = chunks_dir / f"boexio-weekly-chunk-2026-05-27-{slug}"
+                chunk.mkdir(parents=True)
+                metadata = chunk_metadata(candidate_count=1, attempt_count=1, success_count=1)
+                metadata["chunk_slug"] = slug
+                metadata["product_variant_completeness"][product_url]["variant_offset"] = index - 1
+                metadata["product_variant_completeness"][product_url]["variant_plan_limit"] = 1
+                metadata["product_variant_completeness"][product_url]["estimated_variant_count"] = 2
+                (chunk / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+                write_csv(
+                    chunk / "products_current.csv",
+                    PHASE2_CSV_COLUMNS,
+                    [product_row(f"vk-{index}", f"url-{index}")],
+                )
+                write_csv(chunk / "variant_candidates.csv", CANDIDATE_COLUMNS, [])
+                write_csv(chunk / "discovered_product_urls.csv", DISCOVERED_COLUMNS, [])
+                write_csv(chunk / "errors.csv", ERROR_COLUMNS, [])
+
+            exit_code = merge_chunks(
+                argparse.Namespace(
+                    chunks_dir=str(chunks_dir),
+                    matrix_json=str(matrix_path),
+                    discovery_metadata=str(discovery_metadata_path),
+                    output_dir=str(out),
+                    run_id="merged",
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            metadata = json.loads((out / "runs" / "merged" / "run_metadata.json").read_text(encoding="utf-8"))
+            product = metadata["product_variant_completeness"][product_url]
+            self.assertEqual(2, product["variant_candidate_count"])
+            self.assertEqual(2, product["variant_success_count"])
+            self.assertEqual(2, len(product["variant_shards"]))
+            self.assertTrue(product["variant_shard_coverage_complete"])
+            self.assertTrue(product["fetch_attempt_complete"])
+            self.assertTrue(product["comparison_complete"])
+            self.assertEqual(1, metadata["category_completeness"]["chair"]["chunk_input_product_count"])
+
+    def test_merge_marks_missing_variant_shard_as_incomplete(self):
+        product_url = "https://www.boconcept.com/ja-jp/p/chair/1/"
+        completeness: dict[str, dict[str, object]] = {}
+        metadata = chunk_metadata(candidate_count=1, attempt_count=1, success_count=1)
+        metadata["chunk_slug"] = "chair-001"
+        product = metadata["product_variant_completeness"][product_url]
+        product["variant_offset"] = 0
+        product["variant_plan_limit"] = 1
+        product["estimated_variant_count"] = 2
+
+        merge_product_variant_completeness(completeness, metadata)
+
+        merged = completeness[product_url]
+        self.assertFalse(merged["variant_shard_coverage_complete"])
+        self.assertFalse(merged["fetch_attempt_complete"])
+        self.assertIn("variant_shard_coverage_incomplete", merged["reasons"][0])
+
     def test_merge_chunks_combines_csv_and_records_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

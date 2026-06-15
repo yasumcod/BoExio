@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from boexio.phase2_variants import ERROR_COLUMNS
+from boexio.phase2_variants import ERROR_COLUMNS, extract_candidates
 from boexio.phase3_master import (
     CategoryTarget,
     RateLimiter,
@@ -33,6 +34,26 @@ class ProductChunk:
     chunk_slug: str
     product_urls: list[str]
     product_urls_file: str
+
+
+@dataclass(frozen=True)
+class ProductVariantPlan:
+    product_url: str
+    variant_offset: int
+    variant_limit: int
+    estimated_variant_count: int
+
+
+@dataclass(frozen=True)
+class VariantChunk:
+    category_name: str
+    category_url: str
+    category_slug: str
+    chunk_index: int
+    chunk_slug: str
+    product_plans: list[ProductVariantPlan]
+    product_plan_file: str
+    estimated_request_count: int
 
 
 def matrix_for_categories(categories: list[CategoryTarget]) -> dict[str, list[dict[str, str]]]:
@@ -103,6 +124,125 @@ def matrix_for_chunks(chunks: list[ProductChunk]) -> dict[str, list[dict[str, ob
     }
 
 
+def variant_request_budget(request_interval: float, target_minutes: int) -> int:
+    if target_minutes <= 0:
+        raise ValueError("variant_shard_target_minutes must be greater than 0")
+    effective_interval = max(request_interval, 1.0)
+    return max(1, math.floor(target_minutes * 60 / effective_interval))
+
+
+def shard_product_variants(
+    product_url: str,
+    variant_count: int,
+    max_requests_per_chunk: int,
+) -> list[ProductVariantPlan]:
+    if max_requests_per_chunk <= 0:
+        raise ValueError("max_requests_per_chunk must be greater than 0")
+    if variant_count <= 0:
+        return []
+    return [
+        ProductVariantPlan(
+            product_url=product_url,
+            variant_offset=offset,
+            variant_limit=min(max_requests_per_chunk, variant_count - offset),
+            estimated_variant_count=variant_count,
+        )
+        for offset in range(0, variant_count, max_requests_per_chunk)
+    ]
+
+
+def pack_variant_plans(
+    category: CategoryTarget,
+    product_plans: list[ProductVariantPlan],
+    chunk_size: int,
+    max_requests_per_chunk: int,
+    matrix_dir: Path | None = None,
+) -> list[VariantChunk]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+    chunks: list[VariantChunk] = []
+    current: list[ProductVariantPlan] = []
+    current_requests = 0
+
+    def flush() -> None:
+        nonlocal current, current_requests
+        if not current:
+            return
+        chunk_index = len(chunks) + 1
+        chunk_slug = f"{category.slug}-{chunk_index:03d}"
+        product_plan_file = f"matrix/{chunk_slug}-product-plan.json"
+        if matrix_dir is not None:
+            write_json(
+                matrix_dir / f"{chunk_slug}-product-plan.json",
+                {
+                    "products": [
+                        {
+                            "product_url": plan.product_url,
+                            "variant_offset": plan.variant_offset,
+                            "variant_limit": plan.variant_limit,
+                            "estimated_variant_count": plan.estimated_variant_count,
+                        }
+                        for plan in current
+                    ]
+                },
+            )
+        chunks.append(
+            VariantChunk(
+                category_name=category.name,
+                category_url=category.url,
+                category_slug=category.slug,
+                chunk_index=chunk_index,
+                chunk_slug=chunk_slug,
+                product_plans=list(current),
+                product_plan_file=product_plan_file,
+                estimated_request_count=current_requests,
+            )
+        )
+        current = []
+        current_requests = 0
+
+    for plan in product_plans:
+        plan_requests = plan.variant_limit
+        product_already_present = any(item.product_url == plan.product_url for item in current)
+        if current and (
+            current_requests + plan_requests > max_requests_per_chunk
+            or (not product_already_present and len({item.product_url for item in current}) >= chunk_size)
+        ):
+            flush()
+        current.append(plan)
+        current_requests += plan_requests
+        if current_requests >= max_requests_per_chunk:
+            flush()
+    flush()
+    return chunks
+
+
+def matrix_for_variant_chunks(
+    chunks: list[VariantChunk],
+    request_interval: float = 0,
+) -> dict[str, list[dict[str, object]]]:
+    return {
+        "include": [
+            {
+                "category_name": chunk.category_name,
+                "category_url": chunk.category_url,
+                "category_slug": chunk.category_slug,
+                "chunk_index": chunk.chunk_index,
+                "chunk_slug": chunk.chunk_slug,
+                "chunk_product_count": len({plan.product_url for plan in chunk.product_plans}),
+                "product_plan_file": chunk.product_plan_file,
+                "product_urls": sorted({plan.product_url for plan in chunk.product_plans}),
+                "estimated_request_count": chunk.estimated_request_count,
+                "estimated_minimum_seconds": round(
+                    chunk.estimated_request_count * max(request_interval, 0),
+                    3,
+                ),
+            }
+            for chunk in chunks
+        ]
+    }
+
+
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as file:
@@ -134,7 +274,7 @@ def discover_products(args: argparse.Namespace) -> int:
         categories = [category for category in categories if category.slug == args.category_slug]
     limiter = RateLimiter(interval_seconds=args.request_interval)
 
-    chunks: list[ProductChunk] = []
+    chunks: list[VariantChunk] = []
     discovered_rows: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
     logs: list[str] = []
@@ -189,7 +329,59 @@ def discover_products(args: argparse.Namespace) -> int:
                         "discovery_error": "",
                     }
                 )
-            category_chunks = chunk_product_urls(category, limited_urls, args.chunk_size, matrix_dir)
+            max_requests_per_chunk = variant_request_budget(
+                args.request_interval,
+                args.variant_shard_target_minutes,
+            )
+            category_plans: list[ProductVariantPlan] = []
+            for product_index, product_url in enumerate(limited_urls, start=1):
+                try:
+                    product_page = fetch_with_control(product_url, args.timeout, args.retries, limiter)
+                    raw_name = safe_raw_name(
+                        f"planned_product_{category.slug}",
+                        product_index,
+                        product_url,
+                    )
+                    (raw_dir / raw_name).write_text(product_page.html, encoding="utf-8")
+                    candidates = [
+                        candidate
+                        for candidate in extract_candidates(product_url, product_page.html)
+                        if candidate.candidate_status == "pending"
+                    ]
+                    candidate_count = len(candidates)
+                    if args.variant_limit_per_product > 0:
+                        candidate_count = min(candidate_count, args.variant_limit_per_product)
+                    category_plans.extend(
+                        shard_product_variants(
+                            product_url,
+                            candidate_count,
+                            max_requests_per_chunk,
+                        )
+                    )
+                    logs.append(
+                        f"planned_product_url={product_url} candidate_count={candidate_count} "
+                        f"shard_count={math.ceil(candidate_count / max_requests_per_chunk) if candidate_count else 0}"
+                    )
+                    if candidate_count == 0:
+                        errors.append(
+                            error_row(
+                                product_url,
+                                "plan-variants",
+                                "no_variant_candidates",
+                                "product had 0 pending variant candidates",
+                            )
+                        )
+                except Exception as exc:
+                    code, detail = split_error(exc)
+                    errors.append(error_row(product_url, "plan-variants", code, detail))
+                    logs.append(f"failed_variant_plan_url={product_url} code={code} detail={detail}")
+            category_chunks = pack_variant_plans(
+                category,
+                category_plans,
+                args.chunk_size,
+                max_requests_per_chunk,
+                matrix_dir,
+            )
             if args.chunk_slug:
                 category_chunks = [chunk for chunk in category_chunks if chunk.chunk_slug == args.chunk_slug]
             chunks.extend(category_chunks)
@@ -210,11 +402,16 @@ def discover_products(args: argparse.Namespace) -> int:
             errors.append(error_row(category.url, "discover-products", code, detail))
             logs.append(f"failed_category_slug={category.slug} code={code} detail={detail}")
 
-    chunk_matrix = matrix_for_chunks(chunks)
+    chunk_matrix = matrix_for_variant_chunks(chunks, args.request_interval)
     chunk_input_counts_by_category: dict[str, int] = {}
-    for chunk in chunks:
-        chunk_input_counts_by_category[chunk.category_slug] = (
-            chunk_input_counts_by_category.get(chunk.category_slug, 0) + len(chunk.product_urls)
+    for category in categories:
+        chunk_input_counts_by_category[category.slug] = len(
+            {
+                plan.product_url
+                for chunk in chunks
+                if chunk.category_slug == category.slug
+                for plan in chunk.product_plans
+            }
         )
     product_limit_applied = args.product_limit_per_category > 0 or args.product_limit > 0
     filter_applied = bool(args.chunk_slug)
@@ -277,6 +474,11 @@ def discover_products(args: argparse.Namespace) -> int:
         "product_limit": args.product_limit,
         "variant_limit_per_product": args.variant_limit_per_product,
         "chunk_size": args.chunk_size,
+        "variant_shard_target_minutes": args.variant_shard_target_minutes,
+        "max_requests_per_chunk": variant_request_budget(
+            args.request_interval,
+            args.variant_shard_target_minutes,
+        ),
         "category_slug_filter": args.category_slug,
         "chunk_slug_filter": args.chunk_slug,
         "target_categories": [
@@ -298,8 +500,9 @@ def discover_products(args: argparse.Namespace) -> int:
                 "category_slug": chunk.category_slug,
                 "chunk_index": chunk.chunk_index,
                 "chunk_slug": chunk.chunk_slug,
-                "chunk_product_count": len(chunk.product_urls),
-                "product_urls_file": chunk.product_urls_file,
+                "chunk_product_count": len({plan.product_url for plan in chunk.product_plans}),
+                "product_plan_file": chunk.product_plan_file,
+                "estimated_request_count": chunk.estimated_request_count,
             }
             for chunk in chunks
         ],
@@ -341,6 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
     products.add_argument("--product-limit-per-category", type=int, default=3)
     products.add_argument("--variant-limit-per-product", type=int, default=1)
     products.add_argument("--chunk-size", type=int, default=5)
+    products.add_argument("--variant-shard-target-minutes", type=int, default=180)
     products.add_argument("--request-interval", type=float, default=5.0)
     products.add_argument("--retries", type=int, default=2)
     products.add_argument("--category-slug", default="")

@@ -39,13 +39,14 @@ from boexio.phase2_variants import (
     extract_candidates,
     resolve_candidate,
     resolved_variant_row,
+    variant_url,
     write_candidates_csv,
     write_errors_csv,
     write_phase2_csv,
 )
 
 
-PHASE3_PARSER_VERSION = "0.3.2"
+PHASE3_PARSER_VERSION = "0.3.3"
 RETRYABLE_ERROR_CODES = {"HTTP_429", "TIMEOUT_CONNECT", "TIMEOUT_READ", "RATE_LIMITED"}
 STOP_ERROR_CODES = {"HTTP_403"}
 MAX_FAILURE_RATE = 0.30
@@ -59,6 +60,14 @@ class CategoryTarget:
     name: str
     url: str
     slug: str = ""
+
+
+@dataclass(frozen=True)
+class ProductRunPlan:
+    product_url: str
+    variant_offset: int = 0
+    variant_limit: int = 0
+    estimated_variant_count: int = 0
 
 
 CATEGORY_SLUG_OVERRIDES = {
@@ -169,6 +178,29 @@ def read_product_urls_file(path: Path) -> list[str]:
         seen.add(value)
         product_urls.append(value)
     return product_urls
+
+
+def read_product_plan_file(path: Path) -> list[ProductRunPlan]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    products = payload.get("products", [])
+    if not isinstance(products, list):
+        raise ValueError("product plan must contain a products list")
+    plans: list[ProductRunPlan] = []
+    for entry in products:
+        if not isinstance(entry, dict):
+            continue
+        product_url = str(entry.get("product_url", "")).strip()
+        if not product_url:
+            continue
+        plans.append(
+            ProductRunPlan(
+                product_url=product_url,
+                variant_offset=max(int(entry.get("variant_offset", 0)), 0),
+                variant_limit=max(int(entry.get("variant_limit", 0)), 0),
+                estimated_variant_count=max(int(entry.get("estimated_variant_count", 0)), 0),
+            )
+        )
+    return plans
 
 
 def collect_product_urls(category_url: str, html: str) -> list[str]:
@@ -659,6 +691,23 @@ def select_variant_candidates(candidates: list[VariantCandidate], limit_per_prod
     return valid_candidates[:limit_per_product]
 
 
+def select_planned_candidates(
+    candidates: list[VariantCandidate],
+    plan: ProductRunPlan | None,
+    limit_per_product: int,
+) -> tuple[list[VariantCandidate], int]:
+    pending = [candidate for candidate in candidates if candidate.candidate_status == "pending"]
+    if plan is not None:
+        end = plan.variant_offset + plan.variant_limit if plan.variant_limit > 0 else None
+        return pending[plan.variant_offset:end], plan.variant_offset
+    selected = pending if limit_per_product <= 0 else pending[:limit_per_product]
+    return selected, 0
+
+
+def checkpoint_raw_path(raw_dir: Path, product_index: int, candidate_index: int) -> Path:
+    return raw_dir / f"variant_{product_index:03d}_{candidate_index:06d}.json"
+
+
 def run(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc)
     run_id = args.run_id or started_at.strftime("%Y%m%dT%H%M%SZ")
@@ -667,9 +716,11 @@ def run(args: argparse.Namespace) -> int:
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     limiter = RateLimiter(interval_seconds=args.request_interval)
-    if args.product_urls_file:
+    product_plans = read_product_plan_file(Path(args.product_plan_file)) if args.product_plan_file else []
+    product_plan_by_url = {plan.product_url: plan for plan in product_plans}
+    if args.product_urls_file or args.product_plan_file:
         if not args.category_url:
-            raise ValueError("--category-url is required when --product-urls-file is specified")
+            raise ValueError("--category-url is required when a product input file is specified")
         target_categories = [category_from_args(args)]
     else:
         target_categories = read_target_categories(Path(args.targets))
@@ -686,12 +737,32 @@ def run(args: argparse.Namespace) -> int:
     selected_product_urls: list[str] = []
     discovered_product_url_count = 0
     stop_reason = ""
+    current_path = output_dir / "products_current.csv"
+    snapshot_path = output_dir / f"products_{started_at.strftime('%Y-%m-%d')}_{run_id}.csv"
+    candidates_path = output_dir / "variant_candidates.csv"
+    discovered_path = output_dir / "discovered_product_urls.csv"
+    errors_path = output_dir / "errors.csv"
+    log_path = output_dir / "scrape_log.txt"
+    metadata_path = output_dir / "run_metadata.json"
+
+    def write_progress_outputs() -> None:
+        enriched = enrich_rows(rows)
+        write_phase2_csv(current_path, enriched)
+        write_phase2_csv(snapshot_path, enriched)
+        write_candidates_csv(candidates_path, run_id, candidates)
+        write_discovered_urls_csv(discovered_path, run_id, discovered_rows)
+        write_errors_csv(errors_path, error_rows(enriched))
+        log_path.write_text("\n".join(logs) + ("\n" if logs else ""), encoding="utf-8")
 
     try:
         seen_products: set[str] = set()
-        if args.product_urls_file:
+        if args.product_urls_file or args.product_plan_file:
             target = target_categories[0]
-            product_urls = read_product_urls_file(Path(args.product_urls_file))
+            product_urls = (
+                read_product_urls_file(Path(args.product_urls_file))
+                if args.product_urls_file
+                else [plan.product_url for plan in product_plans]
+            )
             category_products_by_url[target.url] = product_urls
             for product_url in product_urls:
                 product_category_by_url[product_url] = target
@@ -706,11 +777,11 @@ def run(args: argparse.Namespace) -> int:
                     }
                 )
             logs.append(
-                f"product_urls_file={args.product_urls_file} category_name={target.name} "
+                f"product_input_file={args.product_plan_file or args.product_urls_file} category_name={target.name} "
                 f"category_url={target.url} product_url_count={len(product_urls)}"
             )
         for category_index, target in enumerate(target_categories, start=1):
-            if args.product_urls_file:
+            if args.product_urls_file or args.product_plan_file:
                 break
             target_url = target.url
             valid, error_code = validate_input_url(target_url)
@@ -780,13 +851,19 @@ def run(args: argparse.Namespace) -> int:
         logs.append(f"variant_limit_per_product={args.variant_limit_per_product}")
         logs.append(f"request_interval={args.request_interval}")
         logs.append(f"retries={args.retries}")
+        logs.append(f"product_plan_file={args.product_plan_file}")
 
         for product_index, product_url in enumerate(selected_product_urls, start=1):
             product_category = product_category_by_url[product_url]
+            product_plan = product_plan_by_url.get(product_url)
             product_stats = product_variant_stats.setdefault(
                 product_url,
                 initial_product_variant_stats(product_url, product_category),
             )
+            if product_plan is not None:
+                product_stats["variant_offset"] = product_plan.variant_offset
+                product_stats["variant_plan_limit"] = product_plan.variant_limit
+                product_stats["estimated_variant_count"] = product_plan.estimated_variant_count
             product_stats["product_fetch_attempt_count"] = int(product_stats["product_fetch_attempt_count"]) + 1
             try:
                 product_page = fetch_with_control(product_url, args.timeout, args.retries, limiter)
@@ -805,125 +882,150 @@ def run(args: argparse.Namespace) -> int:
                         f"candidate_extraction_fallback_url={product_url} code={code} detail={detail}"
                     )
 
-                resolved_entries: list[tuple[VariantCandidate, dict | None, str]] = []
-                unsupported_candidates: list[VariantCandidate] = []
-                for provisional_candidate in provisional_candidates:
-                    if provisional_candidate.candidate_status != "pending":
-                        resolved_entries.append(
-                            (provisional_candidate, None, provisional_candidate.candidate_error)
-                        )
-                        continue
-                    if (
-                        args.variant_limit_per_product > 0
-                        and len(resolved_entries) >= args.variant_limit_per_product
-                    ):
-                        break
+                selected_candidates, candidate_offset = select_planned_candidates(
+                    provisional_candidates,
+                    product_plan,
+                    args.variant_limit_per_product,
+                )
+                pending_count = sum(
+                    1 for candidate in provisional_candidates if candidate.candidate_status == "pending"
+                )
+                if product_plan is not None and len(selected_candidates) != product_plan.variant_limit:
+                    product_stats["candidate_extraction_success"] = False
+                    product_stats["candidate_extraction_error"] = (
+                        "planned_candidate_range_mismatch "
+                        f"offset={product_plan.variant_offset} limit={product_plan.variant_limit} "
+                        f"available={pending_count}"
+                    )
+                product_stats["variant_skipped_count"] = (
+                    max(pending_count - len(selected_candidates), 0)
+                    if product_plan is None and args.variant_limit_per_product > 0
+                    else 0
+                )
+
+                for local_index, provisional_candidate in enumerate(selected_candidates, start=1):
+                    global_index = candidate_offset + local_index
+                    raw_path = checkpoint_raw_path(raw_dir, product_index, global_index)
+                    resolved_candidate: VariantCandidate | None = None
+                    resolved_payload: dict | None = None
+                    resolution_error = ""
                     try:
-                        resolved_candidate, resolved_payload = resolve_candidate_with_control(
-                            provisional_candidate,
-                            args.timeout,
-                            args.retries,
-                            limiter,
-                        )
+                        if raw_path.exists() and raw_path.stat().st_size > 0:
+                            resolved_payload = json.loads(raw_path.read_text(encoding="utf-8"))
+                            resolved_variant_key = str(resolved_payload.get("variantUrlKey", ""))
+                            if not resolved_variant_key:
+                                raise ValueError("checkpoint payload did not contain variantUrlKey")
+                            resolved_candidate = dataclass_replace(
+                                provisional_candidate,
+                                variant_url=variant_url(product_url, resolved_variant_key),
+                                variant_url_key=resolved_variant_key,
+                            )
+                            logs.append(
+                                f"resumed_variant product_url={product_url} candidate_index={global_index}"
+                            )
+                        else:
+                            resolved_candidate, resolved_payload = resolve_candidate_with_control(
+                                provisional_candidate,
+                                args.timeout,
+                                args.retries,
+                                limiter,
+                            )
                         if resolved_candidate is None:
-                            unsupported_candidates.append(
+                            candidates.append(
                                 dataclass_replace(
                                     provisional_candidate,
                                     candidate_status="unsupported",
                                     candidate_error="variant_options_api returned 404",
                                 )
                             )
+                            product_stats["variant_unsupported_count"] = (
+                                int(product_stats["variant_unsupported_count"]) + 1
+                            )
+                            logs.append(
+                                f"unsupported_variant product_url={product_url} candidate_index={global_index}"
+                            )
+                            print(logs[-1], flush=True)
+                            write_progress_outputs()
                             continue
-                        resolved_entries.append((resolved_candidate, resolved_payload, ""))
                     except Exception as exc:
                         code, detail = split_error(exc)
                         resolution_error = f"{code}: {detail}"
-                        resolved_entries.append(
-                            (
-                                dataclass_replace(
-                                    provisional_candidate,
-                                    candidate_status="resolution_failed",
-                                    candidate_error=resolution_error,
-                                ),
-                                None,
-                                resolution_error,
-                            )
+                        resolved_candidate = dataclass_replace(
+                            provisional_candidate,
+                            candidate_status="resolution_failed",
+                            candidate_error=resolution_error,
                         )
-                product_candidates = [entry[0] for entry in resolved_entries]
-                if not product_candidates and product_stats.get("candidate_extraction_success"):
-                    product_stats["candidate_extraction_success"] = False
-                    product_stats["candidate_extraction_error"] = "no_resolved_variants"
-                candidates.extend(product_candidates)
-                candidates.extend(unsupported_candidates)
-                product_candidate_counts[product_url] = len(product_candidates)
-                product_stats["variant_candidate_count"] = len(product_candidates)
-                product_stats["unique_variant_candidate_count"] = len(
-                    {candidate.variant_url for candidate in product_candidates if candidate.variant_url}
-                )
-                product_stats["variant_invalid_candidate_count"] = sum(
-                    1 for candidate in product_candidates if candidate.candidate_status != "pending"
-                )
-                product_stats["variant_unsupported_count"] = len(unsupported_candidates)
+                        resolved_payload = None
 
-                selected_entries = (
-                    resolved_entries
-                    if args.variant_limit_per_product <= 0
-                    else resolved_entries[: args.variant_limit_per_product]
-                )
-                product_stats["variant_skipped_count"] = (
-                    max(len(resolved_entries) - len(selected_entries), 0)
-                    if args.variant_limit_per_product > 0
-                    else 0
-                )
-                for candidate_index, (candidate, resolved_payload, resolution_error) in enumerate(
-                    selected_entries,
-                    start=1,
-                ):
-                    product_stats["variant_fetch_attempt_count"] = int(product_stats["variant_fetch_attempt_count"]) + 1
+                    assert resolved_candidate is not None
+                    candidates.append(resolved_candidate)
+                    product_stats["variant_candidate_count"] = int(product_stats["variant_candidate_count"]) + 1
+                    product_stats["variant_fetch_attempt_count"] = (
+                        int(product_stats["variant_fetch_attempt_count"]) + 1
+                    )
                     if resolved_payload is None:
                         rows.append(
                             add_category_metadata(
                                 failed_row(
                                     run_id,
-                                    candidate.variant_url,
+                                    resolved_candidate.variant_url,
                                     "VARIANT_RESOLUTION_FAILED",
                                     resolution_error,
                                 ),
                                 product_category,
                             )
                         )
-                        product_stats["variant_failure_count"] = int(product_stats["variant_failure_count"]) + 1
+                        product_stats["variant_failure_count"] = (
+                            int(product_stats["variant_failure_count"]) + 1
+                        )
+                        product_stats["variant_invalid_candidate_count"] = (
+                            int(product_stats["variant_invalid_candidate_count"]) + 1
+                        )
+                        logs.append(
+                            f"failed_variant_url={resolved_candidate.variant_url} "
+                            f"candidate_index={global_index} detail={resolution_error}"
+                        )
+                        print(logs[-1], flush=True)
+                        write_progress_outputs()
                         continue
-                    try:
-                        raw_name = safe_raw_name(
-                            f"variant_{product_index:03d}",
-                            candidate_index,
-                            candidate.variant_url,
-                        ).removesuffix(".html") + ".json"
-                        raw_path = raw_dir / raw_name
-                        raw_path.write_text(
-                            json.dumps(resolved_payload, ensure_ascii=False, indent=2) + "\n",
-                            encoding="utf-8",
-                        )
-                        parsed_row = resolved_variant_row(
-                            candidate,
-                            resolved_payload,
-                            f"raw/{raw_name}",
-                            run_id,
-                            datetime.now(timezone.utc).isoformat(),
-                        )
-                        if parsed_row.get("product_name") and not product_stats.get("product_name"):
-                            product_stats["product_name"] = parsed_row["product_name"]
-                        rows.append(add_category_metadata(parsed_row, product_category))
-                        product_stats["variant_success_count"] = int(product_stats["variant_success_count"]) + 1
-                        logs.append(f"resolved_variant_url={candidate.variant_url}")
-                    except StopRunError:
-                        raise
-                    except Exception as exc:
-                        code, detail = split_error(exc)
-                        rows.append(add_category_metadata(failed_row(run_id, candidate.variant_url, code, detail), product_category))
-                        product_stats["variant_failure_count"] = int(product_stats["variant_failure_count"]) + 1
-                        logs.append(f"failed_variant_url={candidate.variant_url} code={code} detail={detail}")
+
+                    raw_path.write_text(
+                        json.dumps(resolved_payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    parsed_row = resolved_variant_row(
+                        resolved_candidate,
+                        resolved_payload,
+                        f"raw/{raw_path.name}",
+                        run_id,
+                        datetime.now(timezone.utc).isoformat(),
+                    )
+                    if parsed_row.get("product_name") and not product_stats.get("product_name"):
+                        product_stats["product_name"] = parsed_row["product_name"]
+                    rows.append(add_category_metadata(parsed_row, product_category))
+                    product_stats["variant_success_count"] = int(product_stats["variant_success_count"]) + 1
+                    logs.append(
+                        f"resolved_variant_url={resolved_candidate.variant_url} "
+                        f"candidate_index={global_index}"
+                    )
+                    print(logs[-1], flush=True)
+                    write_progress_outputs()
+
+                product_stats["unique_variant_candidate_count"] = len(
+                    {
+                        candidate.variant_url
+                        for candidate in candidates
+                        if candidate.product_url == product_url and candidate.variant_url
+                    }
+                )
+                product_candidate_counts[product_url] = int(product_stats["variant_candidate_count"])
+                if (
+                    int(product_stats["variant_candidate_count"]) == 0
+                    and int(product_stats["variant_unsupported_count"]) == 0
+                    and product_stats.get("candidate_extraction_success")
+                ):
+                    product_stats["candidate_extraction_success"] = False
+                    product_stats["candidate_extraction_error"] = "no_resolved_variants"
             except StopRunError as exc:
                 stop_reason = str(exc)
                 raise
@@ -955,14 +1057,6 @@ def run(args: argparse.Namespace) -> int:
     )
     errors.extend(product_completeness_errors)
     errors.extend(category_completeness_errors)
-
-    current_path = output_dir / "products_current.csv"
-    snapshot_path = output_dir / f"products_{started_at.strftime('%Y-%m-%d')}_{run_id}.csv"
-    candidates_path = output_dir / "variant_candidates.csv"
-    discovered_path = output_dir / "discovered_product_urls.csv"
-    errors_path = output_dir / "errors.csv"
-    log_path = output_dir / "scrape_log.txt"
-    metadata_path = output_dir / "run_metadata.json"
 
     write_phase2_csv(current_path, enriched_rows)
     write_phase2_csv(snapshot_path, enriched_rows)
@@ -1067,8 +1161,16 @@ def run(args: argparse.Namespace) -> int:
         "category_slug": args.category_slug or (target_categories[0].slug if len(target_categories) == 1 else ""),
         "chunk_slug": args.chunk_slug,
         "chunk_index": args.chunk_index,
-        "chunk_product_count": len(read_product_urls_file(Path(args.product_urls_file))) if args.product_urls_file else 0,
+        "chunk_product_count": (
+            len(product_plans)
+            if args.product_plan_file
+            else len(read_product_urls_file(Path(args.product_urls_file)))
+            if args.product_urls_file
+            else 0
+        ),
         "product_urls_file": args.product_urls_file,
+        "product_plan_file": args.product_plan_file,
+        "variant_shard": bool(args.product_plan_file),
         "product_limit": args.product_limit,
         "product_limit_per_category": args.product_limit_per_category,
         "variant_limit_per_product": args.variant_limit_per_product,
@@ -1124,6 +1226,8 @@ def run(args: argparse.Namespace) -> int:
             "Unsupported option combinations are excluded only when the variant-options API returns its 404 result.",
             "variant_candidates.csv records generic selected option IDs and names as JSON.",
             "variant_limit_per_product=0 means all pending variant candidates for each product are fetched.",
+            "product_plan_file applies deterministic candidate offsets and limits for variant shards.",
+            "Resolved variant JSON and CSV checkpoints are written after every candidate.",
         ],
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1142,6 +1246,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-slug", default="")
     parser.add_argument("--chunk-index", type=int, default=0)
     parser.add_argument("--product-urls-file", default="")
+    parser.add_argument("--product-plan-file", default="")
     parser.add_argument("--product-limit", type=int, default=0)
     parser.add_argument("--product-limit-per-category", type=int, default=3)
     parser.add_argument("--variant-limit-per-product", type=int, default=1)

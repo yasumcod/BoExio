@@ -4,11 +4,15 @@ from pathlib import Path
 
 from boexio.phase3_master import (
     CategoryTarget,
+    ProductRunPlan,
     add_category_metadata,
     category_slug,
+    checkpoint_raw_path,
     product_variant_completeness_entry,
+    read_product_plan_file,
     read_target_categories,
     read_product_urls_file,
+    select_planned_candidates,
     select_products_by_category,
     select_variant_candidates,
 )
@@ -111,6 +115,39 @@ class Phase3MasterTests(unittest.TestCase):
 
         self.assertEqual(candidates[:2], select_variant_candidates(candidates, 0))
         self.assertEqual(candidates[:1], select_variant_candidates(candidates, 1))
+
+    def test_product_plan_selects_deterministic_candidate_range(self):
+        candidates = [
+            VariantCandidate("p", f"v{index}", f"k{index}", "", "", "", "")
+            for index in range(10)
+        ]
+
+        selected, offset = select_planned_candidates(
+            candidates,
+            ProductRunPlan("p", variant_offset=3, variant_limit=4, estimated_variant_count=10),
+            limit_per_product=0,
+        )
+
+        self.assertEqual(3, offset)
+        self.assertEqual(["k3", "k4", "k5", "k6"], [candidate.variant_url_key for candidate in selected])
+
+    def test_read_product_plan_file_and_checkpoint_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "plan.json"
+            path.write_text(
+                '{"products":[{"product_url":"p","variant_offset":2160,'
+                '"variant_limit":696,"estimated_variant_count":5016}]}',
+                encoding="utf-8",
+            )
+
+            plans = read_product_plan_file(path)
+
+            self.assertEqual(ProductRunPlan("p", 2160, 696, 5016), plans[0])
+            self.assertEqual(
+                root / "variant_002_002161.json",
+                checkpoint_raw_path(root, product_index=2, candidate_index=2161),
+            )
 
     def test_product_variant_completeness_marks_complete_attempts(self):
         entry = product_variant_completeness_entry(

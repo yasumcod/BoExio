@@ -19,6 +19,10 @@ on:
         description: "Products per scrape matrix chunk"
         required: false
         default: "5"
+      variant_shard_target_minutes:
+        description: "Target maximum variant API time per scrape job"
+        required: false
+        default: "180"
       request_interval:
         description: "Seconds between network requests inside each job"
         required: false
@@ -55,6 +59,7 @@ jobs:
       product_limit_per_category: ${{ steps.vars.outputs.product_limit_per_category }}
       variant_limit_per_product: ${{ steps.vars.outputs.variant_limit_per_product }}
       chunk_size: ${{ steps.vars.outputs.chunk_size }}
+      variant_shard_target_minutes: ${{ steps.vars.outputs.variant_shard_target_minutes }}
       request_interval: ${{ steps.vars.outputs.request_interval }}
       retries: ${{ steps.vars.outputs.retries }}
       category_slug: ${{ steps.vars.outputs.category_slug }}
@@ -84,6 +89,7 @@ jobs:
           product_limit_per_category="${{ github.event.inputs.product_limit_per_category }}"
           variant_limit_per_product="${{ github.event.inputs.variant_limit_per_product }}"
           chunk_size="${{ github.event.inputs.chunk_size }}"
+          variant_shard_target_minutes="${{ github.event.inputs.variant_shard_target_minutes }}"
           request_interval="${{ github.event.inputs.request_interval }}"
           retries="${{ github.event.inputs.retries }}"
           category_slug="${{ github.event.inputs.category_slug }}"
@@ -92,6 +98,7 @@ jobs:
           if [ -z "$product_limit_per_category" ]; then product_limit_per_category="0"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="0"; fi
           if [ -z "$chunk_size" ]; then chunk_size="5"; fi
+          if [ -z "$variant_shard_target_minutes" ]; then variant_shard_target_minutes="180"; fi
           if [ -z "$request_interval" ]; then request_interval="5"; fi
           if [ -z "$retries" ]; then retries="2"; fi
           if [ -z "$category_slug" ]; then category_slug=""; fi
@@ -108,6 +115,7 @@ jobs:
             echo "product_limit_per_category=$product_limit_per_category"
             echo "variant_limit_per_product=$variant_limit_per_product"
             echo "chunk_size=$chunk_size"
+            echo "variant_shard_target_minutes=$variant_shard_target_minutes"
             echo "request_interval=$request_interval"
             echo "retries=$retries"
             echo "category_slug=$category_slug"
@@ -173,12 +181,13 @@ jobs:
         run: |
           mkdir -p matrix
           set +e
-          python3 scripts/phase3_matrix.py discover-products \
+          python3 -u scripts/phase3_matrix.py discover-products \
             --run-id "${{ needs.discover-categories.outputs.run_id }}-discover-products" \
             --product-limit "${{ needs.discover-categories.outputs.product_limit }}" \
             --product-limit-per-category "${{ needs.discover-categories.outputs.product_limit_per_category }}" \
             --variant-limit-per-product "${{ needs.discover-categories.outputs.variant_limit_per_product }}" \
             --chunk-size "${{ needs.discover-categories.outputs.chunk_size }}" \
+            --variant-shard-target-minutes "${{ needs.discover-categories.outputs.variant_shard_target_minutes }}" \
             --request-interval "${{ needs.discover-categories.outputs.request_interval }}" \
             --retries "${{ needs.discover-categories.outputs.retries }}" \
             --category-slug "${{ needs.discover-categories.outputs.category_slug }}" \
@@ -198,6 +207,7 @@ jobs:
 
   scrape-product-chunk:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     needs:
       - discover-categories
       - discover-products
@@ -251,14 +261,19 @@ jobs:
           set +e
           chunk_run_id="${{ needs.discover-categories.outputs.run_id }}-phase3-${{ matrix.chunk_slug }}"
           mkdir -p "data/runs/${chunk_run_id}"
-          python3 scripts/phase3_master.py \
+          echo "chunk_run_id=$chunk_run_id" >> "$GITHUB_OUTPUT"
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-${{ matrix.chunk_slug }}" \
+            --dir "data/runs/${chunk_run_id}" >/dev/null 2>&1 || true
+          python3 -u scripts/phase3_master.py \
             --run-id "$chunk_run_id" \
             --category-name "${{ matrix.category_name }}" \
             --category-url "${{ matrix.category_url }}" \
             --category-slug "${{ matrix.category_slug }}" \
             --chunk-index "${{ matrix.chunk_index }}" \
             --chunk-slug "${{ matrix.chunk_slug }}" \
-            --product-urls-file "${{ matrix.product_urls_file }}" \
+            --product-plan-file "${{ matrix.product_plan_file }}" \
             --product-limit "0" \
             --product-limit-per-category "0" \
             --variant-limit-per-product "${{ needs.discover-categories.outputs.variant_limit_per_product }}" \
@@ -266,14 +281,13 @@ jobs:
             --retries "${{ needs.discover-categories.outputs.retries }}" 2>&1 | tee "data/runs/${chunk_run_id}/workflow_chunk.log"
           phase3_exit="${PIPESTATUS[0]}"
           echo "phase3_exit=$phase3_exit" >> "$GITHUB_OUTPUT"
-          echo "chunk_run_id=$chunk_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload chunk artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: boexio-weekly-chunk-${{ needs.discover-categories.outputs.run_date }}-${{ matrix.chunk_slug }}
-          path: data/runs/${{ steps.scrape.outputs.chunk_run_id }}/
+          path: data/runs/${{ needs.discover-categories.outputs.run_id }}-phase3-${{ matrix.chunk_slug }}/
           retention-days: 30
 
   merge-report:

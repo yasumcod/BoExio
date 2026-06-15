@@ -107,7 +107,135 @@ def merge_product_variant_completeness(
     for product_url, entry in chunk_products.items():
         if not isinstance(entry, dict):
             continue
-        product_variant_completeness[str(product_url)] = dict(entry)
+        key = str(product_url)
+        existing = product_variant_completeness.get(key)
+        if existing is None:
+            existing = dict(entry)
+            existing["variant_shards"] = []
+            product_variant_completeness[key] = existing
+        else:
+            for field in (
+                "product_fetch_attempt_count",
+                "product_fetch_success_count",
+                "product_fetch_failure_count",
+                "variant_candidate_count",
+                "variant_unsupported_count",
+                "variant_fetch_attempt_count",
+                "variant_success_count",
+                "variant_failure_count",
+                "variant_skipped_count",
+            ):
+                existing[field] = as_int(existing.get(field), 0) + as_int(entry.get(field), 0)
+            existing["unique_variant_candidate_count"] = as_int(
+                existing.get("variant_candidate_count"),
+                0,
+            )
+            existing["variant_invalid_candidate_count"] = as_int(
+                existing.get("variant_failure_count"),
+                0,
+            )
+            existing["candidate_extraction_success"] = bool(
+                existing.get("candidate_extraction_success", True)
+            ) and bool(entry.get("candidate_extraction_success", True))
+            if not existing.get("product_name") and entry.get("product_name"):
+                existing["product_name"] = entry.get("product_name")
+            if entry.get("candidate_extraction_error"):
+                existing["candidate_extraction_error"] = entry.get("candidate_extraction_error")
+
+        shards = existing.setdefault("variant_shards", [])
+        if isinstance(shards, list):
+            shards.append(
+                {
+                    "chunk_slug": chunk_metadata.get("chunk_slug", ""),
+                    "variant_offset": entry.get("variant_offset", 0),
+                    "variant_plan_limit": entry.get("variant_plan_limit", 0),
+                    "estimated_variant_count": entry.get("estimated_variant_count", 0),
+                }
+            )
+        candidate_count = as_int(existing.get("variant_candidate_count"), 0)
+        attempt_count = as_int(existing.get("variant_fetch_attempt_count"), 0)
+        success_count = as_int(existing.get("variant_success_count"), 0)
+        failure_count = as_int(existing.get("variant_failure_count"), 0)
+        skipped_count = as_int(existing.get("variant_skipped_count"), 0)
+        extraction_success = bool(existing.get("candidate_extraction_success", True))
+        planned_intervals = sorted(
+            (
+                as_int(shard.get("variant_offset"), 0),
+                as_int(shard.get("variant_offset"), 0)
+                + as_int(shard.get("variant_plan_limit"), 0),
+            )
+            for shard in shards
+            if isinstance(shard, dict) and as_int(shard.get("variant_plan_limit"), 0) > 0
+        )
+        estimated_variant_count = max(
+            (
+                as_int(shard.get("estimated_variant_count"), 0)
+                for shard in shards
+                if isinstance(shard, dict)
+            ),
+            default=0,
+        )
+        planned_end = 0
+        planned_ranges_contiguous = True
+        for start, end in planned_intervals:
+            if start != planned_end:
+                planned_ranges_contiguous = False
+                break
+            planned_end = end
+        variant_shard_coverage_complete = (
+            not planned_intervals
+            or (
+                estimated_variant_count > 0
+                and planned_ranges_contiguous
+                and planned_end == estimated_variant_count
+            )
+        )
+        candidate_equation_ok = candidate_count == attempt_count + skipped_count
+        fetch_equation_ok = attempt_count == success_count + failure_count
+        existing["estimated_variant_count"] = estimated_variant_count
+        existing["variant_shard_coverage_complete"] = variant_shard_coverage_complete
+        existing["candidate_attempt_equation_ok"] = candidate_equation_ok
+        existing["fetch_result_equation_ok"] = fetch_equation_ok
+        existing["fetch_attempt_complete"] = (
+            extraction_success
+            and variant_shard_coverage_complete
+            and candidate_equation_ok
+            and fetch_equation_ok
+            and skipped_count == 0
+            and as_int(existing.get("product_fetch_success_count"), 0) > 0
+        )
+        existing["comparison_complete"] = (
+            bool(existing["fetch_attempt_complete"])
+            and failure_count == 0
+            and success_count == candidate_count
+            and candidate_count > 0
+        )
+        reasons: list[str] = []
+        if not extraction_success:
+            reasons.append(
+                f"candidate_extraction_failed={existing.get('candidate_extraction_error', '')}"
+            )
+        if not variant_shard_coverage_complete:
+            reasons.append(
+                "variant_shard_coverage_incomplete "
+                f"covered_until={planned_end} estimated={estimated_variant_count}"
+            )
+        if not candidate_equation_ok:
+            reasons.append(
+                "variant_candidate_count_mismatch "
+                f"candidate={candidate_count} attempt={attempt_count} skipped={skipped_count}"
+            )
+        if not fetch_equation_ok:
+            reasons.append(
+                "variant_fetch_count_mismatch "
+                f"attempt={attempt_count} success={success_count} failure={failure_count}"
+            )
+        if existing["fetch_attempt_complete"] and not existing["comparison_complete"]:
+            reasons.append(
+                "comparison_incomplete "
+                f"candidate={candidate_count} success={success_count} failure={failure_count}"
+            )
+        existing["reasons"] = reasons
 
 
 def aggregate_category_completeness(
@@ -161,15 +289,17 @@ def aggregate_category_completeness(
         info.setdefault("category_url", entry.get("category_url", ""))
 
     expected_chunks_by_category: dict[str, list[str]] = {}
-    expected_products_by_category: dict[str, int] = {}
+    expected_product_urls_by_category: dict[str, set[str]] = {}
     for chunk in expected:
         slug = str(chunk.get("category_slug", ""))
         if not slug:
             continue
         expected_chunks_by_category.setdefault(slug, []).append(str(chunk.get("chunk_slug", "")))
-        expected_products_by_category[slug] = expected_products_by_category.get(slug, 0) + as_int(
-            chunk.get("chunk_product_count"), 0
-        )
+        product_urls = chunk.get("product_urls", [])
+        if isinstance(product_urls, list) and product_urls:
+            expected_product_urls_by_category.setdefault(slug, set()).update(
+                str(url) for url in product_urls if url
+            )
 
     missing_by_category: dict[str, list[str]] = {}
     failed_by_category: dict[str, list[str]] = {}
@@ -227,7 +357,9 @@ def aggregate_category_completeness(
     for slug in sorted(category_info):
         base = discovery_categories.get(slug, {}) if isinstance(discovery_categories.get(slug, {}), dict) else {}
         info = category_info[slug]
-        chunk_input_count = expected_products_by_category.get(slug, as_int(base.get("chunk_input_product_count"), 0))
+        chunk_input_count = len(expected_product_urls_by_category.get(slug, set()))
+        if chunk_input_count == 0:
+            chunk_input_count = as_int(base.get("chunk_input_product_count"), 0)
         processed_count = len(processed_by_category.get(slug, set()))
         sums = variant_sums.get(
             slug,
