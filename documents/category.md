@@ -388,6 +388,17 @@ chair-005: 商品 21 から 23
 
 - `category_slug` は既存カテゴリ mapping 優先、未知カテゴリは ASCII slug または `category-<sha1先頭10桁>`。
 - チャンク取得の公式 input は `--category-name`、`--category-url`、`--category-slug`、`--chunk-slug`、`--product-urls-file`。
+- Phase 3 discovery mode は `category-html` と `sitemap` を持つ。ローカル CLI の既定は後方互換の `category-html`、workflow の既定 input は `sitemap`。
+- workflow は段階実行用に `run_profile` を持つ。次段階の標準は `chair-full`、全カテゴリ移行時は `all-full`、個別調整時は `custom` を使う。
+- `chair-full` は `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1`、`request_interval=5`、`retries=2` を固定する。
+- `all-full` はカテゴリ filter を空にし、同じ sitemap / full variant 条件で全 enabled カテゴリへ広げる。
+- sitemap mode は `https://www.boconcept.com/sitemap.xml` から `https://www.boconcept.com/ja-jp/sitemap/products/` を発見し、`/ja-jp/p/` 商品 URL を母集団にする。
+- 通常カテゴリ URL は公開総数と初期表示数の取得に使う。`?q=page--N` は `Disallow: */shop/*?q=*` に該当するため正式 discovery 経路にしない。
+- sitemap mode の追加成果物は `sitemap_product_urls.csv`、`category_expected_counts.csv`、`classified_product_urls.csv`、`phase3_discovery_metadata.json`。
+- 商品ページ metadata の `biProductGroup` / `itemCategory` により `Chairs`、`Sofas`、`Tables` を `chair`、`sofa`、`table` へ分類する。
+- 商品マスター dedupe は `productMasterKey`、`superMasterKey`、canonical URL、sitemap URL の順でキーを決める。
+- 商品 discovery の `discovery_complete` は、full run でカテゴリ公開総数と分類済み unique 商品マスター件数が一致し、unknown classification が 0 の場合だけ true とする。
+- 受け入れ件数はチェア 80、ソファ 183、テーブル 39。
 - 重複 `variant_key` と重複 `source_url` は最初の行を採用し、重複は `errors.csv` に記録する。
 - 必須カテゴリ欠落と期待チャンク欠落は `failed`、生成済みチャンク内の取得失敗は `partial_success`。
 - full run では aggregate completeness gate を適用し、candidate 数と attempt 数の不一致、missing chunk、fetch attempt 未完了を `failed` にする。

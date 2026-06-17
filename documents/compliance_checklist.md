@@ -106,3 +106,14 @@ robots.txt と利用規約の確認頻度は初期運用では次の通りとす
 - 取得範囲を広げる実装のリリース前。
 
 確認結果はこのファイルへ、確認日、確認者、差分有無、判断を追記する。
+
+## 9. Phase 3 sitemap discovery の取得範囲
+
+2026-06-17 の Phase 3 discovery 再設計では、カテゴリの `?q=page--N` URL を正式 discovery 経路にしない方針で固定した。
+
+- `*/shop/*?q=*` は robots.txt の Disallow に該当するため取得しない。
+- `https://www.boconcept.com/sitemap.xml` と `https://www.boconcept.com/ja-jp/sitemap/products/` を商品 URL 母集団の起点にする。
+- product sitemap から発見した `https://www.boconcept.com/ja-jp/p/` 商品ページだけを分類対象にする。
+- `*/p/*/print/` は引き続き取得しない。
+- 通常カテゴリ URL は `expected_product_count` と `initial_visible_product_count` の抽出にだけ使う。
+- sitemap や設定に robots 除外 URL が混入した場合は `robots_disallowed_discovery_url` として `errors.csv` に記録する。

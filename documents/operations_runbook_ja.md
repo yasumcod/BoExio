@@ -41,7 +41,16 @@
 
 全商品・全パターン取得を行った場合は、追加で次を確認する。
 
+- 次段階の本番検証は workflow_dispatch の `run_profile=chair-full` を使う。これは `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1`、`request_interval=5`、`retries=2` を固定する。
+- チェア単独 full run が成功または許容済み `partial_success` になるまでは、`run_profile=all-full` を使わない。
+- 全カテゴリへ移行する場合は、同じ workflow で `run_profile=all-full` を選ぶ。個別値を変える必要がある場合だけ `run_profile=custom` を使う。
+- `phase3_run_metadata.json` の `discovery_mode` が意図した値か確認する。full run / workflow 標準では `sitemap` を使う。
+- sitemap discovery の追加 artifact として `sitemap_product_urls.csv`、`category_expected_counts.csv`、`classified_product_urls.csv`、`phase3_discovery_metadata.json` が生成されているか確認する。
+- `category_expected_counts.csv` で通常カテゴリ URL から公開総数が取れているか確認する。受け入れ件数はチェア 80、ソファ 183、テーブル 39。
+- `classified_product_urls.csv` で `classification_status=unknown`、`product_master_key_missing`、outlet を確認し、分類不能商品が黙って落ちていないことを確認する。
+- `?q=page--N` は discovery 経路では取得しない。`robots_disallowed_discovery_url` が出ている場合は、該当 URL が sitemap や設定に混入していないか確認する。
 - `phase3_run_metadata.json` の `category_completeness` で、カテゴリ別に `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` を確認する。
+- sitemap mode の `discovery_complete` は、カテゴリ公開総数と分類済み unique 商品マスター件数が一致し、`unknown_classification_count=0` の場合だけ true とする。
 - `product_variant_completeness` で、商品別に `variant_candidate_count`、`variant_fetch_attempt_count`、`variant_success_count`、`variant_failure_count`、`variant_skipped_count` を確認する。
 - `candidate_extraction_success=false` または `candidate_extraction_error` がある商品は、候補数が少なく見えても全件取得完了とは扱わない。
 - `variant_unsupported_count` は、全設定属性の組み合わせを公式 `variant-options` API で解決した結果、商品として存在しない組み合わせの件数を示す。
@@ -77,10 +86,12 @@
 
 1. 欠落カテゴリの `run_metadata.json` で `category_completeness` と `product_variant_completeness` を確認し、`discovery_complete`、`fetch_attempt_complete`、`comparison_complete` のどこで false になったか切り分ける。
 2. workflow / job timeout が疑わしい場合は、該当カテゴリだけを再実行し、必要に応じて `chunk_size=1` まで下げる。
-3. カテゴリ単独 full run は、まず次の input で実行する。
+3. カテゴリ単独 full run は、まず `run_profile=chair-full` で実行する。`custom` で再現する場合の input は次の通り。
 
 ```text
-category_slug=sofa
+run_profile=custom
+category_slug=chair
+discovery_mode=sitemap
 chunk_size=1
 product_limit_per_category=0
 variant_limit_per_product=0
@@ -94,7 +105,7 @@ retries=2
 
 - full run で全カテゴリの `discovery_complete`、`fetch_attempt_complete`、`comparison_complete` が true: `overall_run_status=success`
 - full run で fetch attempt は完了したが、一部 variant が取得失敗または比較不可: `overall_run_status=partial_success`
-- full run で必須カテゴリ欠落、商品数 0 のカテゴリ、期待チャンク artifact 欠落、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致: `overall_run_status=failed`
+- full run で必須カテゴリ欠落、商品数 0 のカテゴリ、カテゴリ公開総数と分類済み商品マスター件数の不一致、unknown classification、期待チャンク artifact 欠落、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致: `overall_run_status=failed`
 - `product_limit_per_category > 0` または `variant_limit_per_product > 0` の制限実行では、full run と同じ strict completeness gate は適用しない。metadata の limit 適用有無を確認する。
 - 重複 `variant_key` / `source_url` は最初の行を採用し、重複を `errors.csv` に記録する。この場合は `partial_success` として確認対象にする。
 

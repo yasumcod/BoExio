@@ -187,6 +187,13 @@ Phase 3 への導線:
 - [x] 全商品・全パターン取得向けに、商品 discovery、variant fetch attempt、comparison completeness を分けて metadata に出す。
 - [x] `variant_candidate_count = variant_fetch_attempt_count + variant_skipped_count` と `variant_fetch_attempt_count = variant_success_count + variant_failure_count` を検査する。
 - [x] completeness 判定が崩れた場合、既存 `errors.csv` schema を維持して `incomplete_product_discovery`、`missing_chunk_artifact`、`incomplete_variant_fetch`、`variant_candidate_count_mismatch`、`comparison_incomplete` を記録する。
+- [x] `?q=page--N` を使わず、product sitemap を母集団にする `--discovery-mode sitemap` を追加する。
+- [x] 通常カテゴリ URL から `expected_product_count` と `initial_visible_product_count` を抽出する。
+- [x] product sitemap 由来の商品ページ metadata から `productMasterKey`、`superMasterKey`、`biProductGroup`、`itemCategory` などを抽出し、カテゴリ分類する。
+- [x] 商品マスター単位で dedupe し、代表 URL を `isDefault=true`、canonical URL、sitemap 順で選ぶ。
+- [x] カテゴリ公開総数と分類済み unique 商品マスター件数を照合し、商品 discovery の `discovery_complete` を再定義する。
+- [x] チェア単独の本番 full run 用に workflow `run_profile=chair-full` を追加する。
+- [x] チェア検証後に全 enabled カテゴリへ移行できるよう、同一 workflow に `run_profile=all-full` を追加する。
 
 完了条件:
 
@@ -218,6 +225,13 @@ Phase 3 への導線:
 - `run_metadata.json` に `scrape_error_code_counts`、`failure_rate`、`schema_mismatch_count`、`run_status_reasons` を保存する。
 - `run_metadata.json` に `target_categories`、`product_limit_per_category`、カテゴリ別の発見件数、選択件数を保存する。
 - `run_metadata.json` に `category_completeness` と `product_variant_completeness` を追加した。
+- `run_metadata.json` に `discovery_mode`、`sitemap_product_url_count`、`category_expected_counts`、sitemap ベースの `category_completeness` を追加した。
+- sitemap mode の追加 artifact は `sitemap_product_urls.csv`、`category_expected_counts.csv`、`classified_product_urls.csv`、`phase3_discovery_metadata.json`。
+- 商品 discovery complete は、full run でカテゴリ公開総数と分類済み unique 商品マスター件数が一致し、unknown classification が 0 の場合だけ true とする。
+- チェア 80 件、ソファ 183 件、テーブル 39 件を sitemap discovery の fixture / 受け入れ件数として扱う。
+- `?q=page--N` は実装の discovery fetch 経路に入れない。robots 除外に該当する URL は `robots_disallowed_discovery_url` として記録する。
+- workflow の次段階標準は `run_profile=chair-full`。これは `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1` を固定する。
+- 全カテゴリへ移行する場合は `run_profile=all-full` を使う。個別調整が必要な場合だけ `run_profile=custom` を使う。
 - `product_limit=0`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`chunk_slug` filter なしの full run では、missing chunk、failed chunk、fetch attempt 未完了、candidate 数と attempt 数の不一致を `failed` にする。
 - fetch attempt が完了しているが一部 variant が取得失敗または比較不可の場合は `partial_success` にする。
 - `product_limit_per_category > 0` または `variant_limit_per_product > 0` の制限実行では、limit 適用を metadata に出し、full run と同じ strict completeness gate は適用しない。
@@ -461,6 +475,7 @@ Phase 3 への導線:
 - [x] errors シートの必須列欠損時にレポート生成が失敗扱いになることをテストする。
 - [x] `schema_version` 不一致時の挙動をテストする。
 - [x] 実取得なしで再現できる fixture HTML / CSV を整備する。Phase 2 の最小 HTML fixture と CSV fixture を追加済み。
+- [x] sitemap XML、通常カテゴリ HTML、商品 metadata HTML の fixture test を追加し、product URL 抽出、重複 dedupe、expected count、metadata 分類、商品マスター dedupe、discovery completeness を確認する。
 - [x] ネットワーク取得を伴う検証は、通常テストと分離して手動または CI の限定ジョブにする。
 
 ### 横断タスク: 未確定事項の決定
@@ -488,6 +503,8 @@ Phase 3 への導線:
 
 - 公開ページのみを対象にする。
 - 対象 URL は `https://www.boconcept.com/ja-jp/shop/` 配下に限定する。
+- Phase 3 sitemap discovery では公式 sitemap と、そこから発見した `https://www.boconcept.com/ja-jp/p/` 商品ページを対象にする。
+- `*/shop/*?q=*` は robots 除外に該当するため、正式 discovery fetch 経路では取得しない。
 - 取得できない項目は推測で補完せず、空欄またはエラーとして扱う。
 - 失敗 URL も `scrape_status=failed` の行として CSV に残す。
 - Phase 1 では差分検知、Excel レポート、GitHub Actions、販売終了状態管理は実装対象外とする。

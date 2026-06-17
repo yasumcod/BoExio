@@ -44,6 +44,23 @@ from boexio.phase2_variants import (
     write_errors_csv,
     write_phase2_csv,
 )
+from boexio.phase3_discovery import (
+    CATEGORY_EXPECTED_COLUMNS,
+    CLASSIFIED_PRODUCT_COLUMNS,
+    SITEMAP_INDEX_URL,
+    SITEMAP_PRODUCT_COLUMNS,
+    category_products_from_deduped,
+    classified_rows,
+    dedupe_product_classifications,
+    discovery_completeness_by_category,
+    expected_count_rows,
+    extract_product_classification,
+    parse_category_expected_count,
+    product_sitemap_url_from_index,
+    product_urls_from_sitemap,
+    unknown_product_classification,
+    write_csv_rows,
+)
 
 
 PHASE3_PARSER_VERSION = "0.3.3"
@@ -708,6 +725,253 @@ def checkpoint_raw_path(raw_dir: Path, product_index: int, candidate_index: int)
     return raw_dir / f"variant_{product_index:03d}_{candidate_index:06d}.json"
 
 
+def sitemap_discovery_outputs(
+    *,
+    args: argparse.Namespace,
+    target_categories: list[CategoryTarget],
+    run_id: str,
+    raw_dir: Path,
+    limiter: RateLimiter,
+    logs: list[str],
+) -> tuple[
+    dict[str, list[str]],
+    dict[str, CategoryTarget],
+    list[dict[str, str]],
+    dict[str, dict[str, object]],
+    list[dict[str, str]],
+    dict[str, object],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+]:
+    category_url_by_slug = {category.slug: category.url for category in target_categories}
+    category_by_url = {category.url: category for category in target_categories}
+    category_by_slug = {category.slug: category for category in target_categories}
+    expected_counts = {}
+    category_pagination_summaries: dict[str, dict[str, object]] = {}
+    sitemap_metadata: dict[str, object] = {
+        "discovery_mode": "sitemap",
+        "sitemap_url": args.sitemap_url,
+        "product_sitemap_url": args.product_sitemap_url,
+    }
+
+    for category_index, category in enumerate(target_categories, start=1):
+        valid, error_code = validate_input_url(category.url)
+        if not valid:
+            expected_counts[category.slug] = parse_category_expected_count(
+                category_name=category.name,
+                category_url=category.url,
+                category_slug=category.slug,
+                html="",
+            )
+            logs.append(f"category_expected_count_failed category_slug={category.slug} code={error_code}")
+            continue
+        try:
+            page = fetch_with_control(category.url, args.timeout, args.retries, limiter)
+            raw_name = safe_raw_name("category_expected", category_index, category.url)
+            (raw_dir / raw_name).write_text(page.html, encoding="utf-8")
+            category_pagination_summaries[category.url] = category_pagination_summary(page.html)
+            expected_counts[category.slug] = parse_category_expected_count(
+                category_name=category.name,
+                category_url=category.url,
+                category_slug=category.slug,
+                html=page.html,
+            )
+        except Exception as exc:
+            code, detail = split_error(exc)
+            expected_counts[category.slug] = parse_category_expected_count(
+                category_name=category.name,
+                category_url=category.url,
+                category_slug=category.slug,
+                html="",
+            )
+            logs.append(f"category_expected_count_failed category_slug={category.slug} code={code} detail={detail}")
+
+    product_sitemap_url = args.product_sitemap_url
+    sitemap_rows: list[dict[str, str]] = []
+    try:
+        if not product_sitemap_url:
+            sitemap_index = fetch_with_control(args.sitemap_url, args.timeout, args.retries, limiter)
+            (raw_dir / "sitemap_index.xml").write_text(sitemap_index.html, encoding="utf-8")
+            product_sitemap_url = product_sitemap_url_from_index(sitemap_index.html)
+        product_sitemap = fetch_with_control(product_sitemap_url, args.timeout, args.retries, limiter)
+        (raw_dir / "sitemap_products.xml").write_text(product_sitemap.html, encoding="utf-8")
+        sitemap_product_urls, sitemap_rows = product_urls_from_sitemap(product_sitemap.html, product_sitemap_url)
+    except Exception as exc:
+        code, detail = split_error(exc)
+        sitemap_product_urls = []
+        sitemap_rows.append(
+            {
+                "source_sitemap_url": product_sitemap_url or args.sitemap_url,
+                "product_url": "",
+                "discovery_status": "failed",
+                "discovery_error": code,
+            }
+        )
+        logs.append(f"sitemap_discovery_failed code={code} detail={detail}")
+
+    sitemap_metadata["product_sitemap_url"] = product_sitemap_url
+    sitemap_metadata["sitemap_product_url_count"] = len(sitemap_product_urls)
+    logs.append(f"sitemap_product_url_count={len(sitemap_product_urls)}")
+
+    classifications = []
+    classification_errors: list[dict[str, str]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for row in sitemap_rows:
+        if row.get("discovery_status") != "failed":
+            continue
+        product_url = row.get("product_url", "")
+        error_code = row.get("discovery_error", "")
+        classification_errors.append(
+            {
+                "url": product_url or row.get("source_sitemap_url", ""),
+                "phase": "discovery",
+                "error_code": "robots_disallowed_discovery_url"
+                if error_code == "ROBOTS_DISALLOWED"
+                else "sitemap_parse_failed",
+                "message": f"product_url={product_url} discovery_error={error_code}",
+                "first_seen_at": now,
+                "last_seen_at": now,
+            }
+        )
+
+    def should_stop_limited_scan() -> bool:
+        if args.product_limit_per_category <= 0 and args.product_limit <= 0:
+            return False
+        deduped_now = dedupe_product_classifications(classifications)
+        products_now = category_products_from_deduped(deduped_now, category_url_by_slug)
+        selected_now = select_products_by_category(
+            products_now,
+            args.product_limit_per_category,
+            args.product_limit,
+        )
+        if args.product_limit > 0 and len(selected_now) >= args.product_limit:
+            return True
+        if args.product_limit_per_category > 0:
+            return all(
+                len(products_now.get(category.url, [])) >= args.product_limit_per_category
+                for category in target_categories
+            )
+        return False
+
+    for product_index, product_url in enumerate(sitemap_product_urls, start=1):
+        try:
+            valid, error_code = validate_discovered_product_url(product_url)
+            if not valid:
+                raise ValueError(f"{error_code}: product URL is not allowed")
+            product_page = fetch_with_control(product_url, args.timeout, args.retries, limiter)
+            raw_name = safe_raw_name("classified_product", product_index, product_url)
+            (raw_dir / raw_name).write_text(product_page.html, encoding="utf-8")
+            classification = extract_product_classification(product_url, product_page.html)
+        except Exception as exc:
+            code, detail = split_error(exc)
+            classification = unknown_product_classification(product_url, f"{code}: {detail}")
+            classification_errors.append(
+                {
+                    "url": product_url,
+                    "phase": "discovery",
+                    "error_code": "product_classification_failed",
+                    "message": f"product_url={product_url} {code}: {detail}",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                }
+            )
+        classifications.append(classification)
+        if classification.classification_status == "classified" and not (
+            classification.product_master_key or classification.super_master_key
+        ):
+            classification_errors.append(
+                {
+                    "url": product_url,
+                    "phase": "discovery",
+                    "error_code": "product_master_key_missing",
+                    "message": f"product_url={product_url} using canonical_or_sitemap_url_for_dedupe",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                }
+            )
+        if classification.classification_status == "unknown":
+            classification_errors.append(
+                {
+                    "url": product_url,
+                    "phase": "discovery",
+                    "error_code": "product_classification_unknown",
+                    "message": f"product_url={product_url} {classification.classification_error}",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                }
+            )
+        if should_stop_limited_scan():
+            logs.append(f"sitemap_limited_scan_stopped classified_product_count={len(classifications)}")
+            break
+
+    deduped = dedupe_product_classifications(classifications)
+    classified_output_rows = classified_rows(classifications, deduped)
+    category_products_by_url = category_products_from_deduped(deduped, category_url_by_slug)
+    product_category_by_url: dict[str, CategoryTarget] = {}
+    for category_url, product_urls in category_products_by_url.items():
+        category = category_by_url.get(category_url)
+        if not category:
+            continue
+        for product_url in product_urls:
+            product_category_by_url[product_url] = category
+
+    discovered_rows: list[dict[str, str]] = []
+    for category_url, product_urls in category_products_by_url.items():
+        category = category_by_url.get(category_url)
+        if not category:
+            continue
+        for product_url in product_urls:
+            discovered_rows.append(
+                {
+                    "run_id": run_id,
+                    "category_name": category.name,
+                    "category_url": category.url,
+                    "product_url": product_url,
+                    "discovery_status": "success",
+                    "discovery_error": "",
+                }
+            )
+
+    sitemap_completeness, completeness_errors = discovery_completeness_by_category(
+        expected_counts=expected_counts,
+        deduped=deduped,
+        product_limit_per_category=args.product_limit_per_category,
+        product_limit=args.product_limit,
+    )
+    sitemap_metadata["category_expected_counts"] = {
+        slug: {
+            "category_name": count.category_name,
+            "category_url": count.category_url,
+            "expected_product_count": count.expected_product_count,
+            "initial_visible_product_count": count.initial_visible_product_count,
+            "expected_count_status": count.expected_count_status,
+            "expected_count_error": count.expected_count_error,
+        }
+        for slug, count in expected_counts.items()
+    }
+    sitemap_metadata["category_completeness"] = sitemap_completeness
+    sitemap_metadata["classified_product_url_count"] = len(classifications)
+    sitemap_metadata["deduped_product_count"] = len(deduped)
+    sitemap_metadata["unknown_classification_count"] = sum(
+        1 for classification in classifications if classification.classification_status == "unknown"
+    )
+    sitemap_metadata["target_category_slugs"] = sorted(category_by_slug)
+
+    errors = [*classification_errors, *completeness_errors]
+    return (
+        category_products_by_url,
+        product_category_by_url,
+        discovered_rows,
+        category_pagination_summaries,
+        errors,
+        sitemap_metadata,
+        sitemap_rows,
+        expected_count_rows(expected_counts.values()),
+        classified_output_rows,
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc)
     run_id = args.run_id or started_at.strftime("%Y%m%dT%H%M%SZ")
@@ -741,9 +1005,16 @@ def run(args: argparse.Namespace) -> int:
     snapshot_path = output_dir / f"products_{started_at.strftime('%Y-%m-%d')}_{run_id}.csv"
     candidates_path = output_dir / "variant_candidates.csv"
     discovered_path = output_dir / "discovered_product_urls.csv"
+    sitemap_products_path = output_dir / "sitemap_product_urls.csv"
+    category_expected_counts_path = output_dir / "category_expected_counts.csv"
+    classified_products_path = output_dir / "classified_product_urls.csv"
+    discovery_metadata_path = output_dir / "phase3_discovery_metadata.json"
     errors_path = output_dir / "errors.csv"
     log_path = output_dir / "scrape_log.txt"
     metadata_path = output_dir / "run_metadata.json"
+    sitemap_discovery_metadata: dict[str, object] = {}
+    sitemap_discovery_errors: list[dict[str, str]] = []
+    sitemap_category_completeness: dict[str, dict[str, object]] = {}
 
     def write_progress_outputs() -> None:
         enriched = enrich_rows(rows)
@@ -780,8 +1051,40 @@ def run(args: argparse.Namespace) -> int:
                 f"product_input_file={args.product_plan_file or args.product_urls_file} category_name={target.name} "
                 f"category_url={target.url} product_url_count={len(product_urls)}"
             )
+        if not args.product_urls_file and not args.product_plan_file and args.discovery_mode == "sitemap":
+            (
+                category_products_by_url,
+                product_category_by_url,
+                discovered_rows,
+                category_pagination_summaries,
+                sitemap_discovery_errors,
+                sitemap_discovery_metadata,
+                sitemap_rows,
+                expected_rows,
+                classified_output_rows,
+            ) = sitemap_discovery_outputs(
+                args=args,
+                target_categories=target_categories,
+                run_id=run_id,
+                raw_dir=raw_dir,
+                limiter=limiter,
+                logs=logs,
+            )
+            sitemap_category_completeness = {
+                slug: entry
+                for slug, entry in sitemap_discovery_metadata.get("category_completeness", {}).items()
+                if isinstance(entry, dict)
+            }
+            write_csv_rows(sitemap_products_path, SITEMAP_PRODUCT_COLUMNS, sitemap_rows)
+            write_csv_rows(category_expected_counts_path, CATEGORY_EXPECTED_COLUMNS, expected_rows)
+            write_csv_rows(classified_products_path, CLASSIFIED_PRODUCT_COLUMNS, classified_output_rows)
+            discovery_metadata_path.write_text(
+                json.dumps(sitemap_discovery_metadata, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
         for category_index, target in enumerate(target_categories, start=1):
-            if args.product_urls_file or args.product_plan_file:
+            if args.product_urls_file or args.product_plan_file or args.discovery_mode == "sitemap":
                 break
             target_url = target.url
             valid, error_code = validate_input_url(target_url)
@@ -1055,8 +1358,19 @@ def run(args: argparse.Namespace) -> int:
         product_limit=args.product_limit,
         category_pagination_summaries=category_pagination_summaries,
     )
+    if sitemap_category_completeness:
+        for slug, sitemap_entry in sitemap_category_completeness.items():
+            base_entry = category_completeness.get(slug, {})
+            merged_entry = dict(sitemap_entry)
+            merged_entry["chunk_input_product_count"] = base_entry.get("chunk_input_product_count", 0)
+            merged_entry["processed_product_count"] = base_entry.get("processed_product_count", 0)
+            merged_entry["product_processing_complete"] = base_entry.get("product_processing_complete", False)
+            merged_entry["product_limit_per_category"] = args.product_limit_per_category
+            merged_entry["product_limit"] = args.product_limit
+            merged_entry["pagination_summary"] = base_entry.get("pagination_summary", {})
+            category_completeness[slug] = merged_entry
     errors.extend(product_completeness_errors)
-    errors.extend(category_completeness_errors)
+    errors.extend(sitemap_discovery_errors if sitemap_category_completeness else category_completeness_errors)
 
     write_phase2_csv(current_path, enriched_rows)
     write_phase2_csv(snapshot_path, enriched_rows)
@@ -1138,6 +1452,16 @@ def run(args: argparse.Namespace) -> int:
         snapshot_path,
         candidates_path,
         discovered_path,
+        *[
+            path
+            for path in (
+                sitemap_products_path,
+                category_expected_counts_path,
+                classified_products_path,
+                discovery_metadata_path,
+            )
+            if path.exists()
+        ],
         errors_path,
         log_path,
         *collect_output_files(raw_dir),
@@ -1171,6 +1495,13 @@ def run(args: argparse.Namespace) -> int:
         "product_urls_file": args.product_urls_file,
         "product_plan_file": args.product_plan_file,
         "variant_shard": bool(args.product_plan_file),
+        "run_profile": args.run_profile,
+        "discovery_mode": args.discovery_mode,
+        "sitemap_url": args.sitemap_url,
+        "product_sitemap_url": sitemap_discovery_metadata.get("product_sitemap_url", args.product_sitemap_url),
+        "sitemap_product_url_count": sitemap_discovery_metadata.get("sitemap_product_url_count", 0),
+        "category_expected_counts": sitemap_discovery_metadata.get("category_expected_counts", {}),
+        "phase3_discovery_metadata": sitemap_discovery_metadata,
         "product_limit": args.product_limit,
         "product_limit_per_category": args.product_limit_per_category,
         "variant_limit_per_product": args.variant_limit_per_product,
@@ -1227,6 +1558,9 @@ def run(args: argparse.Namespace) -> int:
             "variant_candidates.csv records generic selected option IDs and names as JSON.",
             "variant_limit_per_product=0 means all pending variant candidates for each product are fetched.",
             "product_plan_file applies deterministic candidate offsets and limits for variant shards.",
+            "discovery_mode=sitemap uses the product sitemap plus product page metadata classification; category-html remains available for compatibility.",
+            "Sitemap discovery does not fetch /shop/*?q=* pagination URLs.",
+            "discovery_complete is product discovery completeness; fetch_attempt_complete and comparison_complete remain variant-stage checks.",
             "Resolved variant JSON and CSV checkpoints are written after every candidate.",
         ],
     }
@@ -1247,6 +1581,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-index", type=int, default=0)
     parser.add_argument("--product-urls-file", default="")
     parser.add_argument("--product-plan-file", default="")
+    parser.add_argument("--run-profile", default="")
+    parser.add_argument("--discovery-mode", choices=("category-html", "sitemap"), default="category-html")
+    parser.add_argument("--sitemap-url", default=SITEMAP_INDEX_URL)
+    parser.add_argument("--product-sitemap-url", default="")
+    parser.add_argument("--category-expected-counts-file", default="")
+    parser.add_argument("--classified-product-urls-file", default="")
     parser.add_argument("--product-limit", type=int, default=0)
     parser.add_argument("--product-limit-per-category", type=int, default=3)
     parser.add_argument("--variant-limit-per-product", type=int, default=1)

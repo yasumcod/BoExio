@@ -75,6 +75,16 @@ class Phase6WorkflowTests(unittest.TestCase):
 
         self.assertIn("success|partial_success", workflow)
 
+    def test_workflow_has_chair_full_profile_before_all_full(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
+
+        self.assertIn('default: "chair-full"', workflow)
+        self.assertIn("chair-full)", workflow)
+        self.assertIn('category_slug="chair"', workflow)
+        self.assertIn("all-full)", workflow)
+        self.assertIn('discovery_mode="sitemap"', workflow)
+
     def test_release_body_lists_comparison_incomplete_categories(self):
         body = release_body(
             {

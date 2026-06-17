@@ -3,20 +3,34 @@ name: BoExio Weekly Report
 on:
   workflow_dispatch:
     inputs:
+      run_profile:
+        description: "Execution profile"
+        required: false
+        default: "chair-full"
+        type: choice
+        options:
+          - chair-full
+          - all-full
+          - smoke-chair
+          - custom
       product_limit:
-        description: "Optional global maximum products to process in Phase 3; 0 means no global cap"
+        description: "Custom profile only: optional global maximum products; 0 means no global cap"
         required: false
         default: "0"
       product_limit_per_category:
-        description: "Maximum products to discover per category; 0 means all products"
+        description: "Custom profile only: maximum products per category; 0 means all products"
         required: false
         default: "0"
       variant_limit_per_product:
-        description: "Maximum variants per product to fetch in Phase 3; 0 means all variants"
+        description: "Custom profile only: maximum variants per product; 0 means all variants"
         required: false
         default: "0"
+      discovery_mode:
+        description: "Custom profile only: Phase 3 discovery mode"
+        required: false
+        default: "sitemap"
       chunk_size:
-        description: "Products per scrape matrix chunk"
+        description: "Custom profile only: products per scrape matrix chunk"
         required: false
         default: "5"
       variant_shard_target_minutes:
@@ -55,9 +69,11 @@ jobs:
       phase5_run_id: ${{ steps.vars.outputs.phase5_run_id }}
       release_tag: ${{ steps.vars.outputs.release_tag }}
       release_name: ${{ steps.vars.outputs.release_name }}
+      run_profile: ${{ steps.vars.outputs.run_profile }}
       product_limit: ${{ steps.vars.outputs.product_limit }}
       product_limit_per_category: ${{ steps.vars.outputs.product_limit_per_category }}
       variant_limit_per_product: ${{ steps.vars.outputs.variant_limit_per_product }}
+      discovery_mode: ${{ steps.vars.outputs.discovery_mode }}
       chunk_size: ${{ steps.vars.outputs.chunk_size }}
       variant_shard_target_minutes: ${{ steps.vars.outputs.variant_shard_target_minutes }}
       request_interval: ${{ steps.vars.outputs.request_interval }}
@@ -85,24 +101,69 @@ jobs:
           run_id="weekly-${run_date}-${GITHUB_RUN_ID}"
           release_tag="weekly-${run_date}"
           release_name="BoExio Weekly Report ${run_date}"
+          run_profile="${{ github.event.inputs.run_profile }}"
           product_limit="${{ github.event.inputs.product_limit }}"
           product_limit_per_category="${{ github.event.inputs.product_limit_per_category }}"
           variant_limit_per_product="${{ github.event.inputs.variant_limit_per_product }}"
+          discovery_mode="${{ github.event.inputs.discovery_mode }}"
           chunk_size="${{ github.event.inputs.chunk_size }}"
           variant_shard_target_minutes="${{ github.event.inputs.variant_shard_target_minutes }}"
           request_interval="${{ github.event.inputs.request_interval }}"
           retries="${{ github.event.inputs.retries }}"
           category_slug="${{ github.event.inputs.category_slug }}"
           chunk_slug="${{ github.event.inputs.chunk_slug }}"
+          if [ -z "$run_profile" ]; then run_profile="chair-full"; fi
           if [ -z "$product_limit" ]; then product_limit="0"; fi
           if [ -z "$product_limit_per_category" ]; then product_limit_per_category="0"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="0"; fi
+          if [ -z "$discovery_mode" ]; then discovery_mode="sitemap"; fi
           if [ -z "$chunk_size" ]; then chunk_size="5"; fi
           if [ -z "$variant_shard_target_minutes" ]; then variant_shard_target_minutes="180"; fi
           if [ -z "$request_interval" ]; then request_interval="5"; fi
           if [ -z "$retries" ]; then retries="2"; fi
           if [ -z "$category_slug" ]; then category_slug=""; fi
           if [ -z "$chunk_slug" ]; then chunk_slug=""; fi
+          case "$run_profile" in
+            chair-full)
+              product_limit="0"
+              product_limit_per_category="0"
+              variant_limit_per_product="0"
+              discovery_mode="sitemap"
+              chunk_size="1"
+              request_interval="5"
+              retries="2"
+              category_slug="chair"
+              chunk_slug=""
+              ;;
+            smoke-chair)
+              product_limit="0"
+              product_limit_per_category="1"
+              variant_limit_per_product="1"
+              discovery_mode="sitemap"
+              chunk_size="1"
+              request_interval="5"
+              retries="2"
+              category_slug="chair"
+              chunk_slug=""
+              ;;
+            all-full)
+              product_limit="0"
+              product_limit_per_category="0"
+              variant_limit_per_product="0"
+              discovery_mode="sitemap"
+              chunk_size="1"
+              request_interval="5"
+              retries="2"
+              category_slug=""
+              chunk_slug=""
+              ;;
+            custom)
+              ;;
+            *)
+              echo "Unsupported run_profile: $run_profile" >&2
+              exit 1
+              ;;
+          esac
           {
             echo "run_date=$run_date"
             echo "run_id=$run_id"
@@ -111,9 +172,11 @@ jobs:
             echo "phase5_run_id=${run_id}-phase5"
             echo "release_tag=$release_tag"
             echo "release_name=$release_name"
+            echo "run_profile=$run_profile"
             echo "product_limit=$product_limit"
             echo "product_limit_per_category=$product_limit_per_category"
             echo "variant_limit_per_product=$variant_limit_per_product"
+            echo "discovery_mode=$discovery_mode"
             echo "chunk_size=$chunk_size"
             echo "variant_shard_target_minutes=$variant_shard_target_minutes"
             echo "request_interval=$request_interval"
@@ -183,9 +246,11 @@ jobs:
           set +e
           python3 -u scripts/phase3_matrix.py discover-products \
             --run-id "${{ needs.discover-categories.outputs.run_id }}-discover-products" \
+            --run-profile "${{ needs.discover-categories.outputs.run_profile }}" \
             --product-limit "${{ needs.discover-categories.outputs.product_limit }}" \
             --product-limit-per-category "${{ needs.discover-categories.outputs.product_limit_per_category }}" \
             --variant-limit-per-product "${{ needs.discover-categories.outputs.variant_limit_per_product }}" \
+            --discovery-mode "${{ needs.discover-categories.outputs.discovery_mode }}" \
             --chunk-size "${{ needs.discover-categories.outputs.chunk_size }}" \
             --variant-shard-target-minutes "${{ needs.discover-categories.outputs.variant_shard_target_minutes }}" \
             --request-interval "${{ needs.discover-categories.outputs.request_interval }}" \
@@ -268,6 +333,7 @@ jobs:
             --dir "data/runs/${chunk_run_id}" >/dev/null 2>&1 || true
           python3 -u scripts/phase3_master.py \
             --run-id "$chunk_run_id" \
+            --run-profile "${{ needs.discover-categories.outputs.run_profile }}" \
             --category-name "${{ matrix.category_name }}" \
             --category-url "${{ matrix.category_url }}" \
             --category-slug "${{ matrix.category_slug }}" \

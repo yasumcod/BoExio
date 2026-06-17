@@ -205,6 +205,17 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
   - `scrape-product-chunk` は `strategy.fail-fast: false`、`max-parallel: 2`。
   - Release 作成、編集、asset upload は `merge-report` のみで実行する。
   - 再実行 input として `chunk_size`、`category_slug`、`chunk_slug` を追加した。
+- Phase 3 商品 discovery を sitemap-driven に対応した。
+  - 新規 `boexio/phase3_discovery.py` で product sitemap 抽出、カテゴリ公開総数抽出、商品 metadata 分類、商品マスター dedupe、公開総数照合を実装した。
+  - `scripts/phase3_master.py` / `scripts/phase3_matrix.py` に `--discovery-mode category-html|sitemap`、`--sitemap-url`、`--product-sitemap-url` を追加した。
+  - ローカル CLI の既定は後方互換の `category-html`、workflow の既定 input は `sitemap` とした。
+  - `?q=page--N` は正式 discovery 経路にしない。通常カテゴリ URL は公開総数と初期表示数の取得にだけ使う。
+  - sitemap mode は `sitemap_product_urls.csv`、`category_expected_counts.csv`、`classified_product_urls.csv`、`phase3_discovery_metadata.json` を追加出力する。
+  - 商品 discovery complete は `expected_product_count == classified_unique_product_master_count` かつ `unknown_classification_count == 0` の意味に再定義し、variant の `fetch_attempt_complete` / `comparison_complete` と分離した。
+  - チェア 80 件、ソファ 183 件、テーブル 39 件を sitemap discovery の受け入れ件数として扱う。
+- チェア単独の本番 full run 用に workflow `run_profile=chair-full` を追加した。
+  - `chair-full` は `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1` を固定する。
+  - チェア検証後に同じ workflow で `run_profile=all-full` を選ぶと、全 enabled カテゴリへ移行できる。
 - 将来的な管理画面、API、見積書自動生成に必要な追加データを整理した。
 - Phase 7 標準カラム定義を `boexio/quote_columns.py` に追加した。
 - Phase 5 の `current_master` シートを Phase 7 標準カラム順に更新した。
@@ -233,7 +244,8 @@ python3 scripts/phase2_variants.py --run-id phase2-second-leg-check --variant-of
 - 他商品で attributeId が変わるか。
 - カテゴリ固有属性を固定列ではなく key/value 形式にするか。
 - `config/target_categories.csv` の初期カテゴリが UI 上の全カテゴリを網羅しているか。
-- チェアカテゴリの 23 件が UI 上の全件か、追加読み込み API でさらに増えるか。
+- sitemap discovery とカテゴリ公開総数が一致しない場合の運用判断。
+- outlet 商品を対象カテゴリの公開総数へ含めるか。
 - Phase 4 の `removed_items` を次回 run の状態入力としてどう保存・引き継ぐか。
 - Excel レポートの確認責任者と確認期限。
 - GitHub Actions の通知先実体。
