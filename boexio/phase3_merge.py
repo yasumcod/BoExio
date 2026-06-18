@@ -158,6 +158,12 @@ def merge_product_variant_completeness(
         failure_count = as_int(existing.get("variant_failure_count"), 0)
         skipped_count = as_int(existing.get("variant_skipped_count"), 0)
         extraction_success = bool(existing.get("candidate_extraction_success", True))
+        candidate_extraction_error = str(existing.get("candidate_extraction_error", ""))
+        candidate_plan_drift = (
+            not extraction_success
+            and candidate_extraction_error.startswith("planned_candidate_range_mismatch")
+        )
+        candidate_extraction_blocks_fetch = not extraction_success and not candidate_plan_drift
         planned_intervals = sorted(
             (
                 as_int(shard.get("variant_offset"), 0),
@@ -196,8 +202,9 @@ def merge_product_variant_completeness(
         existing["variant_shard_coverage_complete"] = variant_shard_coverage_complete
         existing["candidate_attempt_equation_ok"] = candidate_equation_ok
         existing["fetch_result_equation_ok"] = fetch_equation_ok
+        existing["candidate_plan_drift"] = candidate_plan_drift
         existing["fetch_attempt_complete"] = (
-            extraction_success
+            not candidate_extraction_blocks_fetch
             and variant_shard_coverage_complete
             and candidate_equation_ok
             and fetch_equation_ok
@@ -211,9 +218,11 @@ def merge_product_variant_completeness(
             and candidate_count > 0
         )
         reasons: list[str] = []
-        if not extraction_success:
+        if candidate_plan_drift:
+            reasons.append(f"candidate_plan_drift={candidate_extraction_error}")
+        elif candidate_extraction_blocks_fetch:
             reasons.append(
-                f"candidate_extraction_failed={existing.get('candidate_extraction_error', '')}"
+                f"candidate_extraction_failed={candidate_extraction_error}"
             )
         if not variant_shard_coverage_complete:
             reasons.append(
@@ -425,6 +434,12 @@ def aggregate_category_completeness(
             "unknown_classification_count": as_int(base.get("unknown_classification_count"), 0),
             "duplicate_product_url_count": as_int(base.get("duplicate_product_url_count"), 0),
             "deduped_product_count": as_int(base.get("deduped_product_count"), 0),
+            "expected_product_master_counts": base.get("expected_product_master_counts", {}),
+            "classified_product_master_name_counts": base.get(
+                "classified_product_master_name_counts",
+                {},
+            ),
+            "product_master_name_count_diffs": base.get("product_master_name_count_diffs", []),
             "chunk_input_product_count": chunk_input_count,
             "processed_product_count": processed_count,
             **sums,

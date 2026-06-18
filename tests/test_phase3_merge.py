@@ -211,6 +211,24 @@ class Phase3MergeTests(unittest.TestCase):
         self.assertFalse(merged["fetch_attempt_complete"])
         self.assertIn("variant_shard_coverage_incomplete", merged["reasons"][0])
 
+    def test_merge_keeps_plan_drift_separate_from_fetch_incomplete(self):
+        product_url = "https://www.boconcept.com/ja-jp/p/chair/1/"
+        completeness: dict[str, dict[str, object]] = {}
+        metadata = chunk_metadata(candidate_count=202, attempt_count=202, success_count=202)
+        product = metadata["product_variant_completeness"][product_url]
+        product["candidate_extraction_success"] = False
+        product["candidate_extraction_error"] = (
+            "planned_candidate_range_mismatch offset=0 limit=206 available=202"
+        )
+
+        merge_product_variant_completeness(completeness, metadata)
+
+        merged = completeness[product_url]
+        self.assertTrue(merged["candidate_plan_drift"])
+        self.assertTrue(merged["fetch_attempt_complete"])
+        self.assertTrue(merged["comparison_complete"])
+        self.assertIn("candidate_plan_drift=planned_candidate_range_mismatch", merged["reasons"][0])
+
     def test_merge_chunks_combines_csv_and_records_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

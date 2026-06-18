@@ -46,6 +46,7 @@ from boexio.phase2_variants import (
 )
 from boexio.phase3_discovery import (
     CATEGORY_EXPECTED_COLUMNS,
+    CATEGORY_PRODUCT_MASTER_COUNT_COLUMNS,
     CLASSIFIED_PRODUCT_COLUMNS,
     SITEMAP_INDEX_URL,
     SITEMAP_PRODUCT_COLUMNS,
@@ -56,6 +57,7 @@ from boexio.phase3_discovery import (
     expected_count_rows,
     extract_product_classification,
     parse_category_expected_count,
+    product_master_count_rows,
     product_sitemap_url_from_index,
     product_urls_from_sitemap,
     unknown_product_classification,
@@ -420,7 +422,14 @@ def product_variant_completeness_entry(
             reasons.append("product_fetch_incomplete")
     if variant_invalid_candidate_count:
         reasons.append(f"variant_invalid_candidate_count={variant_invalid_candidate_count}")
-    if not candidate_extraction_success:
+    candidate_plan_drift = (
+        not candidate_extraction_success
+        and candidate_extraction_error.startswith("planned_candidate_range_mismatch")
+    )
+    candidate_extraction_blocks_fetch = not candidate_extraction_success and not candidate_plan_drift
+    if candidate_plan_drift:
+        reasons.append(f"candidate_plan_drift={candidate_extraction_error}")
+    elif candidate_extraction_blocks_fetch:
         reasons.append(f"candidate_extraction_failed={candidate_extraction_error}")
     if limit_applied and variant_skipped_count:
         reasons.append(f"variant_limit_applied skipped={variant_skipped_count}")
@@ -444,7 +453,7 @@ def product_variant_completeness_entry(
 
     fetch_attempt_complete = (
         not limit_applied
-        and candidate_extraction_success
+        and not candidate_extraction_blocks_fetch
         and product_fetch_success_count > 0
         and candidate_attempt_equation_ok
         and fetch_result_equation_ok
@@ -481,6 +490,7 @@ def product_variant_completeness_entry(
         "variant_limit_per_product": variant_limit_per_product,
         "candidate_extraction_success": candidate_extraction_success,
         "candidate_extraction_error": candidate_extraction_error,
+        "candidate_plan_drift": candidate_plan_drift,
         "limit_applied": limit_applied,
         "fetch_attempt_complete": fetch_attempt_complete,
         "comparison_complete": comparison_complete,
@@ -743,6 +753,7 @@ def sitemap_discovery_outputs(
     list[dict[str, str]],
     list[dict[str, str]],
     list[dict[str, str]],
+    list[dict[str, str]],
 ]:
     category_url_by_slug = {category.slug: category.url for category in target_categories}
     category_by_url = {category.url: category for category in target_categories}
@@ -947,6 +958,7 @@ def sitemap_discovery_outputs(
             "initial_visible_product_count": count.initial_visible_product_count,
             "expected_count_status": count.expected_count_status,
             "expected_count_error": count.expected_count_error,
+            "expected_product_master_counts": count.expected_product_master_counts,
         }
         for slug, count in expected_counts.items()
     }
@@ -968,6 +980,7 @@ def sitemap_discovery_outputs(
         sitemap_metadata,
         sitemap_rows,
         expected_count_rows(expected_counts.values()),
+        product_master_count_rows(expected_counts.values()),
         classified_output_rows,
     )
 
@@ -1007,6 +1020,7 @@ def run(args: argparse.Namespace) -> int:
     discovered_path = output_dir / "discovered_product_urls.csv"
     sitemap_products_path = output_dir / "sitemap_product_urls.csv"
     category_expected_counts_path = output_dir / "category_expected_counts.csv"
+    category_product_master_counts_path = output_dir / "category_product_master_counts.csv"
     classified_products_path = output_dir / "classified_product_urls.csv"
     discovery_metadata_path = output_dir / "phase3_discovery_metadata.json"
     errors_path = output_dir / "errors.csv"
@@ -1061,6 +1075,7 @@ def run(args: argparse.Namespace) -> int:
                 sitemap_discovery_metadata,
                 sitemap_rows,
                 expected_rows,
+                product_master_count_output_rows,
                 classified_output_rows,
             ) = sitemap_discovery_outputs(
                 args=args,
@@ -1077,6 +1092,11 @@ def run(args: argparse.Namespace) -> int:
             }
             write_csv_rows(sitemap_products_path, SITEMAP_PRODUCT_COLUMNS, sitemap_rows)
             write_csv_rows(category_expected_counts_path, CATEGORY_EXPECTED_COLUMNS, expected_rows)
+            write_csv_rows(
+                category_product_master_counts_path,
+                CATEGORY_PRODUCT_MASTER_COUNT_COLUMNS,
+                product_master_count_output_rows,
+            )
             write_csv_rows(classified_products_path, CLASSIFIED_PRODUCT_COLUMNS, classified_output_rows)
             discovery_metadata_path.write_text(
                 json.dumps(sitemap_discovery_metadata, ensure_ascii=False, indent=2) + "\n",
@@ -1457,6 +1477,7 @@ def run(args: argparse.Namespace) -> int:
             for path in (
                 sitemap_products_path,
                 category_expected_counts_path,
+                category_product_master_counts_path,
                 classified_products_path,
                 discovery_metadata_path,
             )

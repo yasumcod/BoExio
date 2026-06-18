@@ -244,6 +244,35 @@ class Phase3MasterTests(unittest.TestCase):
         self.assertFalse(entry["comparison_complete"])
         self.assertIn("candidate_extraction_failed=SCHEMA_MISMATCH", entry["reasons"])
 
+    def test_planned_candidate_range_drift_does_not_block_completed_fetch(self):
+        entry = product_variant_completeness_entry(
+            product_url="https://www.boconcept.com/ja-jp/p/example/1/",
+            category=CategoryTarget("チェア", "https://www.boconcept.com/ja-jp/shop/chair/", "chair"),
+            product_fetch_attempt_count=1,
+            product_fetch_success_count=1,
+            variant_candidate_count=202,
+            unique_variant_candidate_count=202,
+            variant_fetch_attempt_count=202,
+            variant_success_count=202,
+            variant_failure_count=0,
+            variant_skipped_count=0,
+            variant_limit_per_product=0,
+            candidate_extraction_success=False,
+            candidate_extraction_error="planned_candidate_range_mismatch offset=0 limit=206 available=202",
+        )
+
+        self.assertTrue(entry["candidate_plan_drift"])
+        self.assertTrue(entry["fetch_attempt_complete"])
+        self.assertTrue(entry["comparison_complete"])
+        self.assertIn(
+            "candidate_plan_drift=planned_candidate_range_mismatch offset=0 limit=206 available=202",
+            entry["reasons"],
+        )
+        self.assertNotIn(
+            "candidate_extraction_failed=planned_candidate_range_mismatch offset=0 limit=206 available=202",
+            entry["reasons"],
+        )
+
     def test_add_category_metadata_preserves_source_row(self):
         row = {"source_url": "https://example.test/product"}
         enriched = add_category_metadata(

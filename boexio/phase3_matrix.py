@@ -23,6 +23,7 @@ from boexio.phase3_master import (
 )
 from boexio.phase3_discovery import (
     CATEGORY_EXPECTED_COLUMNS,
+    CATEGORY_PRODUCT_MASTER_COUNT_COLUMNS,
     CLASSIFIED_PRODUCT_COLUMNS,
     SITEMAP_INDEX_URL,
     SITEMAP_PRODUCT_COLUMNS,
@@ -304,6 +305,7 @@ def discover_products(args: argparse.Namespace) -> int:
             sitemap_discovery_metadata,
             sitemap_rows,
             expected_rows,
+            product_master_count_rows,
             classified_rows,
         ) = sitemap_discovery_outputs(
             args=args,
@@ -325,6 +327,11 @@ def discover_products(args: argparse.Namespace) -> int:
         }
         write_csv_rows(matrix_dir / "sitemap_product_urls.csv", SITEMAP_PRODUCT_COLUMNS, sitemap_rows)
         write_csv_rows(matrix_dir / "category_expected_counts.csv", CATEGORY_EXPECTED_COLUMNS, expected_rows)
+        write_csv_rows(
+            matrix_dir / "category_product_master_counts.csv",
+            CATEGORY_PRODUCT_MASTER_COUNT_COLUMNS,
+            product_master_count_rows,
+        )
         write_csv_rows(matrix_dir / "classified_product_urls.csv", CLASSIFIED_PRODUCT_COLUMNS, classified_rows)
         write_json(matrix_dir / "phase3_discovery_metadata.json", sitemap_discovery_metadata)
 

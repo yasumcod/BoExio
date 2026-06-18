@@ -8,6 +8,7 @@ from boexio.phase3_discovery import (
     discovery_completeness_by_category,
     extract_product_classification,
     parse_category_expected_count,
+    parse_product_master_facet_counts,
     product_sitemap_url_from_index,
     product_urls_from_sitemap,
 )
@@ -31,6 +32,7 @@ PRODUCT_HTML = """
     <script id="__NEXT_DATA__" type="application/json">
       {"props":{"pageProps":{"product":{
         "productMasterKey":"reno-master",
+        "productMasterName":"Reno",
         "superMasterKey":"reno-super",
         "variantUrlKey":"123-1:abc",
         "biProductGroup":"Chairs",
@@ -110,6 +112,7 @@ class Phase3DiscoveryTests(unittest.TestCase):
         )
 
         self.assertEqual("reno-master", classification.product_master_key)
+        self.assertEqual("Reno", classification.product_master_name)
         self.assertEqual("reno-super", classification.super_master_key)
         self.assertEqual("Chairs", classification.bi_product_group)
         self.assertEqual("Chairs", classification.item_category)
@@ -222,6 +225,72 @@ class Phase3DiscoveryTests(unittest.TestCase):
         self.assertFalse(completeness["sofa"]["discovery_complete"])
         self.assertTrue(errors)
         self.assertIn("expected=183 actual=1", errors[0]["message"])
+
+    def test_product_master_facet_counts_are_compared_to_classified_products(self):
+        html = (
+            '"key":"product-master-name","title":"product-master-name","options":['
+            '{"key":"Reno","displayValue":"Reno","selected":false,"count":2},'
+            '{"key":"Osaka","displayValue":"Osaka","selected":false,"count":1},'
+            '{"key":"by nendo","displayValue":"by nendo","selected":false,"count":1}'
+            "]"
+        )
+        expected = {
+            "chair": parse_category_expected_count(
+                category_name="チェア",
+                category_url="https://www.boconcept.com/ja-jp/shop/チェア/",
+                category_slug="chair",
+                html="4アイテム 4 / 4製品を表示中 " + html,
+            )
+        }
+        self.assertEqual({"Osaka": 1, "Reno": 2, "by nendo": 1}, parse_product_master_facet_counts(html))
+        deduped = {
+            "reno-1": DedupedProduct(
+                representative=ProductClassification(
+                    product_url="https://www.boconcept.com/ja-jp/p/reno/1/",
+                    product_master_key="reno-1",
+                    product_master_name="Reno",
+                    classification_slug="chair",
+                    classification_status="classified",
+                ),
+                products=(),
+                representative_reason="sitemap_order",
+            ),
+            "osaka-1": DedupedProduct(
+                representative=ProductClassification(
+                    product_url="https://www.boconcept.com/ja-jp/p/osaka/1/",
+                    product_master_key="osaka-1",
+                    product_master_name="Osaka",
+                    classification_slug="chair",
+                    classification_status="classified",
+                ),
+                products=(),
+                representative_reason="sitemap_order",
+            ),
+            "by-nendo-1": DedupedProduct(
+                representative=ProductClassification(
+                    product_url="https://www.boconcept.com/ja-jp/p/by-nendo/1/",
+                    product_master_key="by-nendo-1",
+                    product_master_name="By Nendo",
+                    classification_slug="chair",
+                    classification_status="classified",
+                ),
+                products=(),
+                representative_reason="sitemap_order",
+            ),
+        }
+
+        completeness, errors = discovery_completeness_by_category(
+            expected_counts=expected,
+            deduped=deduped,
+            product_limit_per_category=0,
+        )
+
+        self.assertFalse(completeness["chair"]["discovery_complete"])
+        self.assertEqual(
+            [{"product_master_name": "Reno", "expected": 2, "actual": 1, "delta": -1}],
+            completeness["chair"]["product_master_name_count_diffs"],
+        )
+        self.assertIn("Reno expected=2 actual=1", errors[0]["message"])
 
 
 if __name__ == "__main__":

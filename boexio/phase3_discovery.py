@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from xml.etree import ElementTree
 
 from boexio.phase1_poc import validate_discovered_product_url
@@ -26,10 +28,18 @@ CATEGORY_EXPECTED_COLUMNS = [
     "expected_count_status",
     "expected_count_error",
 ]
+CATEGORY_PRODUCT_MASTER_COUNT_COLUMNS = [
+    "category_name",
+    "category_url",
+    "category_slug",
+    "product_master_name",
+    "expected_count",
+]
 CLASSIFIED_PRODUCT_COLUMNS = [
     "product_url",
     "representative_product_url",
     "product_master_key",
+    "product_master_name",
     "super_master_key",
     "bi_product_group",
     "bi_product_type",
@@ -56,12 +66,14 @@ class CategoryExpectedCount:
     initial_visible_product_count: int | None
     expected_count_status: str
     expected_count_error: str = ""
+    expected_product_master_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ProductClassification:
     product_url: str
     product_master_key: str = ""
+    product_master_name: str = ""
     super_master_key: str = ""
     bi_product_group: str = ""
     bi_product_type: str = ""
@@ -173,7 +185,63 @@ def parse_category_expected_count(
         initial_visible_product_count=initial_visible,
         expected_count_status="success" if not errors else "unknown",
         expected_count_error="; ".join(errors),
+        expected_product_master_counts=parse_product_master_facet_counts(html),
     )
+
+
+def _balanced_json_array(text: str, array_start: int) -> str:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[array_start:], array_start):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return text[array_start : index + 1]
+    raise ValueError("balanced JSON array end not found")
+
+
+def parse_product_master_facet_counts(html: str) -> dict[str, int]:
+    text = unescape_next_payload(html)
+    marker_index = text.find('"key":"product-master-name"')
+    if marker_index == -1:
+        return {}
+    options_index = text.find('"options":[', marker_index)
+    if options_index == -1:
+        return {}
+    array_start = text.find("[", options_index)
+    if array_start == -1:
+        return {}
+    try:
+        options = json.loads(_balanced_json_array(text, array_start))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    counts: dict[str, int] = {}
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        name = str(option.get("displayValue") or option.get("key") or "").strip()
+        if not name:
+            continue
+        try:
+            count = int(option.get("count", 0))
+        except (TypeError, ValueError):
+            continue
+        counts[name] = count
+    return dict(sorted(counts.items()))
 
 
 def _regex_json_string(text: str, key: str) -> str:
@@ -246,6 +314,7 @@ def extract_product_classification(product_url: str, html: str) -> ProductClassi
     text = unescape_next_payload(html)
     default_variant_url, is_default = _default_variant_url(html, product_url)
     product_master_key = _regex_json_string(text, "productMasterKey")
+    product_master_name = _regex_json_string(text, "productMasterName")
     super_master_key = _regex_json_string(text, "superMasterKey")
     bi_product_group = _regex_json_string(text, "biProductGroup")
     bi_product_type = _regex_json_string(text, "biProductType")
@@ -273,6 +342,7 @@ def extract_product_classification(product_url: str, html: str) -> ProductClassi
     return ProductClassification(
         product_url=product_url,
         product_master_key=product_master_key,
+        product_master_name=product_master_name,
         super_master_key=super_master_key,
         bi_product_group=bi_product_group,
         bi_product_type=bi_product_type,
@@ -334,6 +404,7 @@ def classified_rows(classifications: Iterable[ProductClassification], deduped: d
                 or representative.canonical_url
                 or representative.product_url,
                 "product_master_key": classification.product_master_key,
+                "product_master_name": classification.product_master_name,
                 "super_master_key": classification.super_master_key,
                 "bi_product_group": classification.bi_product_group,
                 "bi_product_type": classification.bi_product_type,
@@ -374,6 +445,21 @@ def category_products_from_deduped(
     return products
 
 
+def product_master_count_key(name: str) -> str:
+    return unicodedata.normalize("NFKC", unquote(name)).strip().casefold()
+
+
+def normalized_product_master_counts(counts: dict[str, int]) -> dict[str, tuple[str, int]]:
+    normalized: dict[str, tuple[str, int]] = {}
+    for display_name, count in counts.items():
+        key = product_master_count_key(display_name)
+        if not key:
+            continue
+        current_display, current_count = normalized.get(key, (display_name, 0))
+        normalized[key] = (current_display, current_count + count)
+    return normalized
+
+
 def discovery_completeness_by_category(
     *,
     expected_counts: dict[str, CategoryExpectedCount],
@@ -382,6 +468,7 @@ def discovery_completeness_by_category(
     product_limit: int = 0,
 ) -> tuple[dict[str, dict[str, object]], list[dict[str, str]]]:
     classified_by_slug: dict[str, set[str]] = {}
+    product_master_counts_by_slug: dict[str, dict[str, int]] = {}
     duplicate_by_slug: dict[str, int] = {}
     unknown_count = 0
     for key, group in deduped.items():
@@ -390,6 +477,10 @@ def discovery_completeness_by_category(
             unknown_count += len(group.products)
             continue
         classified_by_slug.setdefault(slug, set()).add(key)
+        product_master_name = group.representative.product_master_name.strip()
+        if product_master_name:
+            counts = product_master_counts_by_slug.setdefault(slug, {})
+            counts[product_master_name] = counts.get(product_master_name, 0) + 1
         duplicate_by_slug[slug] = duplicate_by_slug.get(slug, 0) + max(len(group.products) - 1, 0)
 
     limit_applied = product_limit_per_category > 0 or product_limit > 0
@@ -399,6 +490,25 @@ def discovery_completeness_by_category(
     for slug, expected in expected_counts.items():
         classified_count = len(classified_by_slug.get(slug, set()))
         duplicate_count = duplicate_by_slug.get(slug, 0)
+        expected_master_counts = expected.expected_product_master_counts
+        actual_master_counts = product_master_counts_by_slug.get(slug, {})
+        expected_master_counts_normalized = normalized_product_master_counts(expected_master_counts)
+        actual_master_counts_normalized = normalized_product_master_counts(actual_master_counts)
+        master_count_diffs = []
+        for product_master_key in sorted(set(expected_master_counts_normalized) | set(actual_master_counts_normalized)):
+            expected_display, expected_count = expected_master_counts_normalized.get(product_master_key, ("", 0))
+            actual_display, actual_count = actual_master_counts_normalized.get(product_master_key, ("", 0))
+            if expected_count == actual_count:
+                continue
+            product_master_name = expected_display or actual_display
+            master_count_diffs.append(
+                {
+                    "product_master_name": product_master_name,
+                    "expected": expected_count,
+                    "actual": actual_count,
+                    "delta": actual_count - expected_count,
+                }
+            )
         reasons: list[str] = []
         if limit_applied:
             reasons.append("product_limit_applied")
@@ -408,6 +518,14 @@ def discovery_completeness_by_category(
             reasons.append(
                 f"discovery_count_mismatch expected={expected.expected_product_count} actual={classified_count}"
             )
+        if not limit_applied and master_count_diffs:
+            diff_summary = ", ".join(
+                f"{diff['product_master_name']} expected={diff['expected']} actual={diff['actual']}"
+                for diff in master_count_diffs[:5]
+            )
+            if len(master_count_diffs) > 5:
+                diff_summary += f", +{len(master_count_diffs) - 5} more"
+            reasons.append(f"product_master_name_count_mismatch {diff_summary}")
         if not limit_applied and unknown_count:
             reasons.append(f"unknown_classification_count={unknown_count}")
         discovery_complete = not reasons
@@ -423,6 +541,9 @@ def discovery_completeness_by_category(
             "unknown_classification_count": unknown_count,
             "duplicate_product_url_count": duplicate_count,
             "deduped_product_count": classified_count,
+            "expected_product_master_counts": dict(sorted(expected_master_counts.items())),
+            "classified_product_master_name_counts": dict(sorted(actual_master_counts.items())),
+            "product_master_name_count_diffs": master_count_diffs,
             "limit_applied": limit_applied,
             "discovery_complete_scope": "sitemap_expected_count",
             "discovery_complete": discovery_complete,
@@ -469,4 +590,20 @@ def expected_count_rows(expected_counts: Iterable[CategoryExpectedCount]) -> lis
                 "expected_count_error": count.expected_count_error,
             }
         )
+    return rows
+
+
+def product_master_count_rows(expected_counts: Iterable[CategoryExpectedCount]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for count in expected_counts:
+        for product_master_name, expected_count in count.expected_product_master_counts.items():
+            rows.append(
+                {
+                    "category_name": count.category_name,
+                    "category_url": count.category_url,
+                    "category_slug": count.category_slug,
+                    "product_master_name": product_master_name,
+                    "expected_count": str(expected_count),
+                }
+            )
     return rows
