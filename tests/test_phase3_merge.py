@@ -7,7 +7,11 @@ from pathlib import Path
 
 from boexio.phase2_variants import CANDIDATE_COLUMNS, ERROR_COLUMNS, PHASE2_CSV_COLUMNS
 from boexio.phase3_matrix import DISCOVERED_COLUMNS
-from boexio.phase3_merge import merge_chunks, merge_product_variant_completeness
+from boexio.phase3_merge import (
+    merge_chunks,
+    merge_product_variant_completeness,
+    strict_status_from_completeness,
+)
 
 
 CHAIR_URL = "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/"
@@ -119,6 +123,40 @@ def chunk_metadata(
 
 
 class Phase3MergeTests(unittest.TestCase):
+    def test_strict_status_fails_on_discovery_incomplete(self):
+        status, reasons = strict_status_from_completeness(
+            {
+                "chair": {
+                    "discovery_complete": False,
+                    "fetch_attempt_complete": True,
+                    "comparison_complete": True,
+                }
+            }
+        )
+
+        self.assertEqual("failed", status)
+        self.assertEqual(["discovery_complete=false categories=chair"], reasons)
+
+    def test_strict_status_still_fails_on_incomplete_fetch(self):
+        status, reasons = strict_status_from_completeness(
+            {
+                "chair": {
+                    "discovery_complete": False,
+                    "fetch_attempt_complete": False,
+                    "comparison_complete": True,
+                }
+            }
+        )
+
+        self.assertEqual("failed", status)
+        self.assertEqual(
+            [
+                "discovery_complete=false categories=chair",
+                "fetch_attempt_complete=false categories=chair",
+            ],
+            reasons,
+        )
+
     def test_merge_aggregates_variant_shards_for_same_product(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
