@@ -6,10 +6,10 @@ on:
       run_profile:
         description: "Execution profile"
         required: false
-        default: "chair-full"
+        default: "sofa-full"
         type: choice
         options:
-          - chair-full
+          - sofa-full
           - all-full
           - smoke-chair
           - custom
@@ -112,7 +112,7 @@ jobs:
           retries="${{ github.event.inputs.retries }}"
           category_slug="${{ github.event.inputs.category_slug }}"
           chunk_slug="${{ github.event.inputs.chunk_slug }}"
-          if [ -z "$run_profile" ]; then run_profile="chair-full"; fi
+          if [ -z "$run_profile" ]; then run_profile="sofa-full"; fi
           if [ -z "$product_limit" ]; then product_limit="0"; fi
           if [ -z "$product_limit_per_category" ]; then product_limit_per_category="0"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="0"; fi
@@ -124,7 +124,7 @@ jobs:
           if [ -z "$category_slug" ]; then category_slug=""; fi
           if [ -z "$chunk_slug" ]; then chunk_slug=""; fi
           case "$run_profile" in
-            chair-full)
+            sofa-full)
               product_limit="0"
               product_limit_per_category="0"
               variant_limit_per_product="0"
@@ -133,7 +133,7 @@ jobs:
               variant_shard_target_minutes="30"
               request_interval="5"
               retries="2"
-              category_slug="chair"
+              category_slug="sofa"
               chunk_slug=""
               ;;
             smoke-chair)
