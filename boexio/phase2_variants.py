@@ -34,7 +34,7 @@ from boexio.phase1_poc import (
 )
 
 
-PHASE2_PARSER_VERSION = "0.2.2"
+PHASE2_PARSER_VERSION = "0.2.3"
 VARIANT_OPTIONS_URL = "https://www.boconcept.com/api/product/variant-options/?locale=ja-jp"
 PHASE2_CSV_COLUMNS = [
     *CSV_COLUMNS,
@@ -407,7 +407,10 @@ def resolve_candidate(candidate: VariantCandidate, timeout: int) -> tuple[Varian
         response_status = payload.get("res", {}).get("status")
         if response_status == 404:
             return None, payload
-        raise ValueError(f"variant option resolution failed: {payload.get('message', 'unknown error')}")
+        message = str(payload.get("message", "unknown error"))
+        if any(marker in message.lower() for marker in ("timeout", "timed out", "time out")):
+            raise RuntimeError(f"TIMEOUT_READ: variant options API: {message}")
+        raise ValueError(f"variant option resolution failed: {message}")
     data = payload.get("data")
     if not isinstance(data, dict):
         raise ValueError("variant option response did not contain product data")

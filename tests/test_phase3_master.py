@@ -1,10 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from boexio.phase3_master import (
     CategoryTarget,
     ProductRunPlan,
+    RateLimiter,
     add_category_metadata,
     category_slug,
     checkpoint_raw_path,
@@ -12,6 +14,7 @@ from boexio.phase3_master import (
     read_product_plan_file,
     read_target_categories,
     read_product_urls_file,
+    resolve_candidate_with_control,
     select_planned_candidates,
     select_products_by_category,
     select_variant_candidates,
@@ -130,6 +133,24 @@ class Phase3MasterTests(unittest.TestCase):
 
         self.assertEqual(3, offset)
         self.assertEqual(["k3", "k4", "k5", "k6"], [candidate.variant_url_key for candidate in selected])
+
+    def test_variant_option_timeout_is_retried_by_controlled_resolver(self):
+        candidate = VariantCandidate("p", "v", "k", "", "", "", "", super_master_key="SM1")
+
+        with patch(
+            "boexio.phase3_master.resolve_candidate",
+            side_effect=[RuntimeError("TIMEOUT_READ: variant options API: timeout"), (candidate, {"status": "ok"})],
+        ) as mocked:
+            resolved, payload = resolve_candidate_with_control(
+                candidate,
+                timeout=10,
+                retries=1,
+                limiter=RateLimiter(0),
+            )
+
+        self.assertEqual(candidate, resolved)
+        self.assertEqual({"status": "ok"}, payload)
+        self.assertEqual(2, mocked.call_count)
 
     def test_read_product_plan_file_and_checkpoint_name(self):
         with tempfile.TemporaryDirectory() as directory:

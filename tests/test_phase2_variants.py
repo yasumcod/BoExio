@@ -275,6 +275,38 @@ class Phase2VariantTests(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_resolve_candidate_classifies_api_timeout_as_retryable(self):
+        candidate = VariantCandidate(
+            product_url="https://www.boconcept.com/ja-jp/p/example/current/",
+            variant_url="https://www.boconcept.com/ja-jp/p/example/guessed/",
+            variant_url_key="guessed",
+            selected_leg_id="",
+            selected_leg="",
+            selected_upholstery_id="",
+            selected_upholstery="",
+            selected_options_json='{"option":"transient-timeout"}',
+            super_master_key="SM1",
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "message": "The operation was aborted due to timeout",
+                    }
+                ).encode("utf-8")
+
+        with patch("boexio.phase2_variants.urlopen", return_value=Response()):
+            with self.assertRaisesRegex(RuntimeError, r"^TIMEOUT_READ: variant options API:"):
+                resolve_candidate(candidate, timeout=10)
+
     def test_resolved_variant_row_maps_api_product_data(self):
         candidate = VariantCandidate(
             product_url="product",
