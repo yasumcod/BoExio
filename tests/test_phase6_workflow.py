@@ -75,13 +75,13 @@ class Phase6WorkflowTests(unittest.TestCase):
 
         self.assertIn("success|partial_success", workflow)
 
-    def test_workflow_has_sofa_full_profile_before_all_full(self):
+    def test_workflow_has_table_full_profile_before_all_full(self):
         repo_root = Path(__file__).resolve().parents[1]
         workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
 
-        self.assertIn('default: "sofa-full"', workflow)
-        self.assertIn("sofa-full)", workflow)
-        self.assertIn('category_slug="sofa"', workflow)
+        self.assertIn('default: "table-full"', workflow)
+        self.assertIn("table-full)", workflow)
+        self.assertIn('category_slug="table"', workflow)
         self.assertIn("all-full)", workflow)
         self.assertIn('discovery_mode="sitemap"', workflow)
 
