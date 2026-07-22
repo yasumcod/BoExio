@@ -260,6 +260,15 @@ jobs:
             --category-slug "${{ needs.discover-categories.outputs.category_slug }}" \
             --chunk-slug "${{ needs.discover-categories.outputs.chunk_slug }}" 2>&1 | tee matrix/discover_products_stdout.log
           discover_exit="${PIPESTATUS[0]}"
+          set -e
+          if [ "$discover_exit" -ne 0 ]; then
+            echo "Product discovery failed with exit code ${discover_exit}." >&2
+            exit "$discover_exit"
+          fi
+          if ! python3 scripts/phase3_matrix.py validate-chunk-matrix --input matrix/chunk_matrix.json; then
+            echo "Product discovery produced an empty chunk matrix." >&2
+            exit 1
+          fi
           matrix_json="$(python3 -c 'import json; print(json.dumps(json.load(open("matrix/chunk_matrix.json")), ensure_ascii=False))')"
           echo "chunk_matrix=$matrix_json" >> "$GITHUB_OUTPUT"
           echo "discover_exit=$discover_exit" >> "$GITHUB_OUTPUT"
@@ -274,6 +283,7 @@ jobs:
 
   scrape-product-chunk:
     runs-on: ubuntu-latest
+    if: needs.discover-categories.result == 'success' && needs.discover-products.result == 'success'
     timeout-minutes: 300
     needs:
       - discover-categories

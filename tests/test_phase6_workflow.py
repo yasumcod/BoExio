@@ -85,6 +85,16 @@ class Phase6WorkflowTests(unittest.TestCase):
         self.assertIn("all-full)", workflow)
         self.assertIn('discovery_mode="sitemap"', workflow)
 
+    def test_workflow_guards_empty_chunk_matrix_before_matrix_job(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
+
+        self.assertIn("validate-chunk-matrix", workflow)
+        self.assertIn(
+            "if: needs.discover-categories.result == 'success' && needs.discover-products.result == 'success'",
+            workflow,
+        )
+
     def test_release_body_lists_comparison_incomplete_categories(self):
         body = release_body(
             {

@@ -307,6 +307,8 @@ def classification_slug_for_metadata(bi_product_group: str, item_category: str) 
         return "sofa", ""
     if "tables" in values or "table" in values:
         return "table", ""
+    if "beds" in values or "bed" in values:
+        return "bed", ""
     return "", "unsupported_or_unknown_category"
 
 

@@ -12,6 +12,7 @@ from boexio.phase3_matrix import (
     matrix_for_variant_chunks,
     pack_variant_plans,
     shard_product_variants,
+    validate_chunk_matrix,
     variant_request_budget,
 )
 
@@ -93,6 +94,12 @@ class Phase3MatrixTests(unittest.TestCase):
             matrix = matrix_for_variant_chunks(chunks, request_interval=5)
             self.assertEqual(["p1", "p2"], matrix["include"][0]["product_urls"])
             self.assertEqual(9500, matrix["include"][0]["estimated_minimum_seconds"])
+
+    def test_validate_chunk_matrix_rejects_empty_matrix(self):
+        with self.assertRaisesRegex(ValueError, "at least one vector"):
+            validate_chunk_matrix({"include": []})
+
+        validate_chunk_matrix({"include": [{"chunk_slug": "bed-001"}]})
 
 
 if __name__ == "__main__":

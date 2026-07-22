@@ -123,6 +123,7 @@ class Phase3DiscoveryTests(unittest.TestCase):
         self.assertEqual(("sofa", ""), classification_slug_for_metadata("Sofas", ""))
         self.assertEqual(("table", ""), classification_slug_for_metadata("Tables", ""))
         self.assertEqual(("chair", ""), classification_slug_for_metadata("Chairs", ""))
+        self.assertEqual(("bed", ""), classification_slug_for_metadata("Beds", ""))
 
     def test_product_master_dedupe_prefers_default_then_canonical(self):
         first = ProductClassification(

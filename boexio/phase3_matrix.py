@@ -252,6 +252,12 @@ def matrix_for_variant_chunks(
     }
 
 
+def validate_chunk_matrix(matrix: dict[str, object]) -> None:
+    include = matrix.get("include")
+    if not isinstance(include, list) or not include:
+        raise ValueError("chunk matrix must define at least one vector")
+
+
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as file:
@@ -269,6 +275,12 @@ def write_categories(args: argparse.Namespace) -> int:
     categories = read_target_categories(Path(args.targets))
     payload = matrix_for_categories(categories)
     write_json(Path(args.output), payload)
+    return 0
+
+
+def validate_chunk_matrix_file(args: argparse.Namespace) -> int:
+    matrix = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    validate_chunk_matrix(matrix)
     return 0
 
 
@@ -609,6 +621,10 @@ def build_parser() -> argparse.ArgumentParser:
     categories.add_argument("--targets", default="config/target_categories.csv")
     categories.add_argument("--output", default="matrix/category_matrix.json")
     categories.set_defaults(func=write_categories)
+
+    validate = subparsers.add_parser("validate-chunk-matrix")
+    validate.add_argument("--input", required=True)
+    validate.set_defaults(func=validate_chunk_matrix_file)
 
     products = subparsers.add_parser("discover-products")
     products.add_argument("--targets", default="config/target_categories.csv")
