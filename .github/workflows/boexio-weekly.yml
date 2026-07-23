@@ -6,9 +6,10 @@ on:
       run_profile:
         description: "Execution profile"
         required: false
-        default: "bed-full"
+        default: "remaining-full"
         type: choice
         options:
+          - remaining-full
           - bed-full
           - all-full
           - smoke-chair
@@ -46,7 +47,7 @@ on:
         required: false
         default: "2"
       category_slug:
-        description: "Optional category_slug filter for rerun planning; blank means all enabled categories"
+        description: "Optional comma-separated category_slug filter for rerun planning; blank means all enabled categories"
         required: false
         default: ""
       chunk_slug:
@@ -112,7 +113,7 @@ jobs:
           retries="${{ github.event.inputs.retries }}"
           category_slug="${{ github.event.inputs.category_slug }}"
           chunk_slug="${{ github.event.inputs.chunk_slug }}"
-          if [ -z "$run_profile" ]; then run_profile="bed-full"; fi
+          if [ -z "$run_profile" ]; then run_profile="remaining-full"; fi
           if [ -z "$product_limit" ]; then product_limit="0"; fi
           if [ -z "$product_limit_per_category" ]; then product_limit_per_category="0"; fi
           if [ -z "$variant_limit_per_product" ]; then variant_limit_per_product="0"; fi
@@ -124,6 +125,18 @@ jobs:
           if [ -z "$category_slug" ]; then category_slug=""; fi
           if [ -z "$chunk_slug" ]; then chunk_slug=""; fi
           case "$run_profile" in
+            remaining-full)
+              product_limit="0"
+              product_limit_per_category="0"
+              variant_limit_per_product="0"
+              discovery_mode="sitemap"
+              chunk_size="1"
+              variant_shard_target_minutes="30"
+              request_interval="5"
+              retries="2"
+              category_slug="storage,lamp,rug,accessories,outdoor-furniture"
+              chunk_slug=""
+              ;;
             bed-full)
               product_limit="0"
               product_limit_per_category="0"

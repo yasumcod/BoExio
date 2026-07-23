@@ -284,6 +284,10 @@ def validate_chunk_matrix_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def parse_category_slug_filter(value: str) -> set[str]:
+    return {slug.strip() for slug in value.split(",") if slug.strip()}
+
+
 def discover_products(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc)
     run_id = args.run_id or started_at.strftime("%Y%m%dT%H%M%SZ")
@@ -291,8 +295,9 @@ def discover_products(args: argparse.Namespace) -> int:
     raw_dir = matrix_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     categories = read_target_categories(Path(args.targets))
-    if args.category_slug:
-        categories = [category for category in categories if category.slug == args.category_slug]
+    category_slug_filter = parse_category_slug_filter(args.category_slug)
+    if category_slug_filter:
+        categories = [category for category in categories if category.slug in category_slug_filter]
     limiter = RateLimiter(interval_seconds=args.request_interval)
 
     chunks: list[VariantChunk] = []

@@ -389,9 +389,10 @@ chair-005: 商品 21 から 23
 - `category_slug` は既存カテゴリ mapping 優先、未知カテゴリは ASCII slug または `category-<sha1先頭10桁>`。
 - チャンク取得の公式 input は `--category-name`、`--category-url`、`--category-slug`、`--chunk-slug`、`--product-urls-file`。
 - Phase 3 discovery mode は `category-html` と `sitemap` を持つ。ローカル CLI の既定は後方互換の `category-html`、workflow の既定 input は `sitemap`。
-- workflow は段階実行用に `run_profile` を持つ。次段階の標準は `chair-full`、全カテゴリ移行時は `all-full`、個別調整時は `custom` を使う。
+- workflow は段階実行用に `run_profile` を持つ。残り5カテゴリの標準は `remaining-full`、単一カテゴリ検証は `chair-full` / `bed-full`、全カテゴリ移行時は `all-full`、個別調整時は `custom` を使う。
+- `remaining-full` は `category_slug=storage,lamp,rug,accessories,outdoor-furniture` を指定し、収納、ランプ、ラグ、アクセサリー、アウトドア家具だけを対象にする。
 - `chair-full` は `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1`、`request_interval=5`、`retries=2` を固定する。
-- `all-full` はカテゴリ filter を空にし、同じ sitemap / full variant 条件で全 enabled カテゴリへ広げる。
+- `all-full` はカテゴリ filter を空にし、同じ sitemap / full variant 条件で全 enabled カテゴリへ広げる。`category_slug` の filter は単一値またはカンマ区切りの複数値を受け付ける。
 - sitemap mode は `https://www.boconcept.com/sitemap.xml` から `https://www.boconcept.com/ja-jp/sitemap/products/` を発見し、`/ja-jp/p/` 商品 URL を母集団にする。
 - 通常カテゴリ URL は公開総数と初期表示数の取得に使う。`?q=page--N` は `Disallow: */shop/*?q=*` に該当するため正式 discovery 経路にしない。
 - sitemap mode の追加成果物は `sitemap_product_urls.csv`、`category_expected_counts.csv`、`classified_product_urls.csv`、`phase3_discovery_metadata.json`。

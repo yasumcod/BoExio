@@ -41,7 +41,8 @@
 
 全商品・全パターン取得を行った場合は、追加で次を確認する。
 
-- 次段階の本番検証は workflow_dispatch の `run_profile=chair-full` を使う。これは `category_slug=chair`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1`、`request_interval=5`、`retries=2` を固定する。
+- 残り5カテゴリの本番取得は workflow_dispatch の `run_profile=remaining-full` を使う。これは `category_slug=storage,lamp,rug,accessories,outdoor-furniture`、`product_limit_per_category=0`、`variant_limit_per_product=0`、`discovery_mode=sitemap`、`chunk_size=1`、`request_interval=5`、`retries=2` を固定する。
+- 単一カテゴリの本番検証は workflow_dispatch の `run_profile=chair-full` または `bed-full` を使う。`category_slug` は単一値またはカンマ区切りの複数 slug を指定できる。
 - チェア単独 full run が成功または許容済み `partial_success` になるまでは、`run_profile=all-full` を使わない。
 - 全カテゴリへ移行する場合は、同じ workflow で `run_profile=all-full` を選ぶ。個別値を変える必要がある場合だけ `run_profile=custom` を使う。
 - `phase3_run_metadata.json` の `discovery_mode` が意図した値か確認する。full run / workflow 標準では `sitemap` を使う。
@@ -76,7 +77,7 @@
 
 カテゴリ分割実行後の再開手順:
 
-1. 欠落または失敗した `category_slug` / `chunk_slug` を確認する。
+1. 欠落または失敗した `category_slug` / `chunk_slug` を確認する。複数カテゴリをまとめて再実行する場合は `category_slug` をカンマ区切りで指定する。
 2. 失敗カテゴリまたは失敗チャンクだけを `workflow_dispatch` で再実行する。`category_slug` と `chunk_slug` を指定できる。`chunk_slug` だけで再実行する場合も、可能な限り対応する `category_slug` を併せて指定する。
 3. 再実行結果を集約 job で結合し、Release 更新は集約 job のみで行う。
 4. 403、captcha、challenge が出た場合は `max-parallel` を増やさず、必要なら 1 へ下げる。

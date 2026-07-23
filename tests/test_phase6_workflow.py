@@ -75,11 +75,16 @@ class Phase6WorkflowTests(unittest.TestCase):
 
         self.assertIn("success|partial_success", workflow)
 
-    def test_workflow_has_bed_full_profile_before_all_full(self):
+    def test_workflow_has_remaining_full_profile_before_existing_profiles(self):
         repo_root = Path(__file__).resolve().parents[1]
         workflow = (repo_root / ".github/workflows/boexio-weekly.yml").read_text(encoding="utf-8")
 
-        self.assertIn('default: "bed-full"', workflow)
+        self.assertIn('default: "remaining-full"', workflow)
+        self.assertIn("remaining-full)", workflow)
+        self.assertIn(
+            'category_slug="storage,lamp,rug,accessories,outdoor-furniture"',
+            workflow,
+        )
         self.assertIn("bed-full)", workflow)
         self.assertIn('category_slug="bed"', workflow)
         self.assertIn("all-full)", workflow)

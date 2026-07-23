@@ -299,8 +299,17 @@ def _default_variant_url(html: str, product_url: str) -> tuple[str, bool]:
     return urljoin(product_url, f"/ja-jp/p/{slug}/{variant_url_key}/"), True
 
 
-def classification_slug_for_metadata(bi_product_group: str, item_category: str) -> tuple[str, str]:
-    values = {bi_product_group.strip().lower(), item_category.strip().lower()}
+def classification_slug_for_metadata(
+    bi_product_group: str,
+    item_category: str,
+    item_category2: str = "",
+) -> tuple[str, str]:
+    values = {
+        value.strip().casefold()
+        for value in (bi_product_group, item_category)
+        if value.strip()
+    }
+    subcategory = item_category2.strip().casefold()
     if "chairs" in values or "chair" in values:
         return "chair", ""
     if "sofas" in values or "sofa" in values:
@@ -309,6 +318,16 @@ def classification_slug_for_metadata(bi_product_group: str, item_category: str) 
         return "table", ""
     if "beds" in values or "bed" in values:
         return "bed", ""
+    if "storage" in values:
+        return "storage", ""
+    if "outdoor" in values or "outdoor furniture" in values:
+        return "outdoor-furniture", ""
+    if "accessories" in values or "accessory" in values:
+        if subcategory in {"lamps", "lamp", "lighting"}:
+            return "lamp", ""
+        if subcategory in {"rugs", "rug"}:
+            return "rug", ""
+        return "accessories", ""
     return "", "unsupported_or_unknown_category"
 
 
@@ -324,7 +343,11 @@ def extract_product_classification(product_url: str, html: str) -> ProductClassi
     item_category2 = _regex_json_string(text, "itemCategory2")
     is_outlet = _regex_json_bool(text, "isOutlet")
     canonical = _canonical_url(html)
-    classification_slug, classification_error = classification_slug_for_metadata(bi_product_group, item_category)
+    classification_slug, classification_error = classification_slug_for_metadata(
+        bi_product_group,
+        item_category,
+        item_category2,
+    )
     if classification_slug:
         status = "classified"
         error = ""

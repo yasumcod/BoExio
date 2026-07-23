@@ -124,6 +124,11 @@ class Phase3DiscoveryTests(unittest.TestCase):
         self.assertEqual(("table", ""), classification_slug_for_metadata("Tables", ""))
         self.assertEqual(("chair", ""), classification_slug_for_metadata("Chairs", ""))
         self.assertEqual(("bed", ""), classification_slug_for_metadata("Beds", ""))
+        self.assertEqual(("storage", ""), classification_slug_for_metadata("Storage", ""))
+        self.assertEqual(("outdoor-furniture", ""), classification_slug_for_metadata("Outdoor", ""))
+        self.assertEqual(("lamp", ""), classification_slug_for_metadata("Accessories", "Accessories", "Lamps"))
+        self.assertEqual(("rug", ""), classification_slug_for_metadata("Accessories", "Accessories", "Rugs"))
+        self.assertEqual(("accessories", ""), classification_slug_for_metadata("Accessories", "Accessories", "Textiles"))
 
     def test_product_master_dedupe_prefers_default_then_canonical(self):
         first = ProductClassification(

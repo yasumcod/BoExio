@@ -10,6 +10,7 @@ from boexio.phase3_matrix import (
     matrix_for_categories,
     matrix_for_chunks,
     matrix_for_variant_chunks,
+    parse_category_slug_filter,
     pack_variant_plans,
     shard_product_variants,
     validate_chunk_matrix,
@@ -18,6 +19,15 @@ from boexio.phase3_matrix import (
 
 
 class Phase3MatrixTests(unittest.TestCase):
+    def test_category_slug_filter_accepts_comma_separated_values(self):
+        self.assertEqual(
+            {"storage", "lamp", "outdoor-furniture"},
+            parse_category_slug_filter("storage, lamp, outdoor-furniture"),
+        )
+
+    def test_category_slug_filter_ignores_empty_values(self):
+        self.assertEqual({"chair"}, parse_category_slug_filter(",chair,, "))
+
     def test_matrix_for_categories_uses_enabled_category_shape(self):
         matrix = matrix_for_categories(
             [CategoryTarget("チェア", "https://www.boconcept.com/ja-jp/shop/%E3%83%81%E3%82%A7%E3%82%A2/", "chair")]
